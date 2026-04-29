@@ -39,17 +39,19 @@ csshd list --mine                                     # shows your open tickets
 
 ### How auth works
 
-1. The first time you run `csshd login`, it asks for (or takes via flag) a helpdesk URL.
-2. It fetches `<url>/.well-known/csshd-config` — a public, unauthenticated endpoint that returns the OAuth identifiers (tenant ID, client ID, scope) the helpdesk wants the CLI to use.
-3. It starts an OAuth 2.0 device authorization flow against Microsoft Entra. You get a code + URL ("Visit https://microsoft.com/devicelogin and enter ABCD-1234"); paste it in your browser, approve, done.
-4. The resulting JWT is stored in your **OS keychain** (macOS Keychain / Windows Credential Manager / Linux Secret Service). Never on disk in plaintext.
-5. Every subsequent CLI command attaches the JWT as `Authorization: Bearer …` to helpdesk API calls. The helpdesk validates against MS's public JWKS.
+1. The first time you run `csshd login`, you point it at a helpdesk URL.
+2. CLI asks the helpdesk for an authorization session. The helpdesk returns a short user-friendly code (e.g. `ABCD-1234`) and a verification URL.
+3. CLI prints something like: `Open https://your-helpdesk-url/cli-link?code=ABCD-1234 and approve.`
+4. You open the link in your browser. If you're not signed in, the helpdesk's normal SSO flow handles it (Microsoft Entra in CSS's case, but the CLI doesn't care). Once you're authenticated, you see "Approve CLI access for code ABCD-1234?" — click Approve.
+5. Meanwhile the CLI is polling. As soon as you approve, the helpdesk hands the CLI an opaque bearer token (`csshd_…`). The token is stored in your **OS keychain** (macOS Keychain / Windows Credential Manager / Linux Secret Service) — never on disk in plaintext.
+6. Every subsequent CLI command attaches the token as `Authorization: Bearer csshd_…` on requests to the helpdesk's `/api/v1/*` endpoints.
 
-**No secrets in this repo.** The `csshd` binary has no CSS-specific identifiers compiled in — it gets them from the helpdesk on first connect. That means:
+**The CLI never talks to your identity provider directly.** All identity goes through the helpdesk. That means:
 
-- A fork of this repo can talk to a different helpdesk install with no code change.
-- Rotating the Entra app means updating one row in `SystemConfig` on the helpdesk; CLIs pick it up next launch.
-- Anyone reading the source has no extra information to use against you.
+- No tenant IDs, client IDs, or app registrations in this repo.
+- Token revocation is a single DB write — log into the web, visit `/settings/cli-tokens`, click Revoke.
+- If you ever swap identity providers, the CLI doesn't change.
+- A fork pointed at a different helpdesk install needs zero code change.
 
 ## Commands (planned)
 
@@ -69,7 +71,7 @@ csshd tui                       # interactive ratatui app (Phase 2)
 ## Roadmap
 
 **Phase 0 (helpdesk-side, blocks Phase 1):**
-- Bearer-token middleware on the helpdesk API. Validates Entra-issued JWTs against MS JWKS, maps to User. Today the API only accepts NextAuth session cookies.
+- Helpdesk-issued bearer tokens. Device-code flow (`/api/v1/cli/auth/init` + `/cli-link` approval page + `/api/v1/cli/auth/poll`), opaque `csshd_…` tokens stored hashed, middleware that accepts them on `/api/v1/*` alongside the existing NextAuth session cookies. Revocation UI at `/settings/cli-tokens`. See `plans/PHASE-0-helpdesk-bearer-auth.md` for the full spec.
 
 **Phase 1 — plumbing CLI (this repo, ~1 week of focused work):**
 - OIDC device-code login against Entra; refresh on demand.
@@ -122,7 +124,7 @@ git tag v0.1.0 && git push --tags
 
 ## Architecture
 
-- **Auth:** Microsoft Entra OIDC device-code flow. Tokens stored in OS keychain via [`keyring`](https://crates.io/crates/keyring). The CLI talks straight to Entra; the helpdesk validates the resulting JWT.
+- **Auth:** Helpdesk-brokered device-code flow. The CLI talks only to the helpdesk; the helpdesk handles whatever identity provider it wants behind the scenes. Tokens are opaque `csshd_…` strings stored in OS keychain via [`keyring`](https://crates.io/crates/keyring). Helpdesk-issued, helpdesk-revocable.
 - **HTTP:** [`reqwest`](https://crates.io/crates/reqwest) with `rustls-tls` (no OpenSSL dep, simpler cross-compile).
 - **TUI:** [`ratatui`](https://ratatui.rs) + [`crossterm`](https://crates.io/crates/crossterm).
 - **Distribution:** [`cargo-dist`](https://github.com/axodotdev/cargo-dist) cross-compiles for `x86_64-{linux,macos,windows}` and `aarch64-{linux,macos}`, generates installer scripts, and publishes via GitHub Releases on git tag.

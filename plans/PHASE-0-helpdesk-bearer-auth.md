@@ -1,112 +1,164 @@
-# Phase 0 — helpdesk-side bearer-token auth
+# Phase 0 — helpdesk-side device-code flow + CLI tokens
 
 This is the helpdesk-side change that **blocks csshd Phase 1**. Lives in
 `css-md/CSSHelpdesk`, not in this repo. Captured here so we don't lose it.
 
-## What's needed
+## Design — helpdesk brokers the auth
 
-The helpdesk API today only accepts NextAuth session cookies. The CLI sends
-`Authorization: Bearer <jwt>` with an Entra-issued JWT. We need a small
-middleware that:
+The CLI never talks to Entra. The CLI talks only to the helpdesk. The
+helpdesk uses its existing NextAuth+Entra flow to identify the user
+(zero new Entra app registrations) and mints its own opaque bearer
+tokens that the CLI carries on every API call.
 
-1. Sees `Authorization: Bearer <jwt>` on a request.
-2. Validates the JWT:
-   - Issuer: `https://login.microsoftonline.com/<tenant-id>/v2.0`. Tenant
-     ID lives in `int_csshd_tenant_id` (or env fallback). Not in the
-     csshd repo — that's the whole point.
-   - Audience: a new "CSS Helpdesk CLI" App Registration's
-     Application ID URI (different from the OIDC login app — that one's
-     for browser sessions, this one is the API audience the CLI presents).
-   - Signature: against MS's JWKS at
-     `https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys`,
-     cached for ~24h.
-   - Not expired.
-3. Resolves the JWT's `oid` claim (Entra object ID) → `User.entraId` →
-   `User`. If found, attaches `{ user: { id, role, ... } }` to the request
-   the same shape `auth()` produces today.
-4. If the header is absent, falls through to the existing NextAuth path
-   (so browser sessions keep working).
+**Why this shape:**
+- One Entra app instead of two; no admin consent dance.
+- Token revocation is a DB write, not "wait for JWT expiry."
+- If we ever swap identity providers, csshd doesn't change.
+- No tenant/client IDs leak through `.well-known` (we don't need that
+  endpoint at all in this design).
+- The CLI's trust boundary is the helpdesk URL, not Microsoft.
 
-## Where to add it
+## Flow
 
-`src/lib/auth-bearer.ts` (new). Then refactor `auth()` in `src/lib/auth.ts`
-to call it first; if no Bearer token, fall through to NextAuth's session.
+1. `csshd login --helpdesk https://your-helpdesk-url` →
+   `POST /api/v1/cli/auth/init` →
+   CLI gets `{ deviceCode, userCode: "ABCD-1234", verificationUri,
+   expiresIn: 600, interval: 5 }`.
+2. CLI prints:
+   `Open https://your-helpdesk-url/cli-link?code=ABCD-1234 and approve.`
+3. User opens link in browser. If not signed in, existing NextAuth flow
+   bounces them to Entra. Once authenticated, page shows: "Approve CLI
+   access for code ABCD-1234? Valid 90 days. Revocable at
+   /settings/cli-tokens." Approve / Deny buttons.
+4. Approve → `POST /api/v1/cli/auth/approve` → marks session approved,
+   links to current `userId`, mints a `CliToken`.
+5. CLI is polling `/api/v1/cli/auth/poll` every `interval` seconds. When
+   approved, the poll returns `{ accessToken, expiresAt }`. CLI stores
+   in OS keychain (via `keyring` crate).
+6. Every subsequent helpdesk API call:
+   `Authorization: Bearer csshd_<opaque-token>`.
 
-Or — simpler — leave `auth()` alone and add a separate helper
-`authOrBearer()` that the API routes opt into. Audit each route handler.
-Less invasive but more touch points.
+## Schema additions (additive, no `--accept-data-loss` needed)
 
-I'd vote for the first approach: `auth()` becomes the unified entry point
-that handles both. Single change, single test surface.
+```prisma
+model CliAuthSession {
+  id          String   @id @default(cuid())
+  deviceCode  String   @unique  // long random — CLI's session handle
+  userCode    String   @unique  // short human code shown in browser ("ABCD-1234")
+  userId      String?           // null until approved
+  user        User?    @relation("CliAuthSessionUser", fields: [userId], references: [id])
+  approvedAt  DateTime?
+  deniedAt    DateTime?
+  expiresAt   DateTime           // ~10 min from create
+  createdAt   DateTime @default(now())
+  @@index([expiresAt])
+}
 
-## New endpoints
+model CliToken {
+  id          String   @id @default(cuid())
+  tokenHash   String   @unique  // sha256(token) — never store the token itself
+  userId      String
+  user        User     @relation("CliTokenUser", fields: [userId], references: [id])
+  name        String?            // user-supplied: "Nick's MacBook"
+  lastUsedAt  DateTime?
+  expiresAt   DateTime            // 90 days from issue
+  revokedAt   DateTime?
+  createdAt   DateTime @default(now())
+  @@index([userId])
+}
+```
 
-- `GET /.well-known/csshd-config` — **public, unauthenticated** discovery
-  endpoint. Returns:
+User model gets two back-relations: `cliAuthSessions CliAuthSession[] @relation("CliAuthSessionUser")` and `cliTokens CliToken[] @relation("CliTokenUser")`.
+
+## Endpoints
+
+### Public (no auth required)
+
+- `POST /api/v1/cli/auth/init` — body: `{ name?: string }` (optional client name). Returns:
   ```json
   {
-    "name": "CSS IT Helpdesk",
-    "tenantId": "<from int_csshd_tenant_id>",
-    "clientId": "<from int_csshd_client_id>",
-    "scope": "<from int_csshd_scope, e.g. api://csshd-cli/Tickets.ReadWrite>",
-    "oauthIssuer": "https://login.microsoftonline.com/<tenant>/v2.0",
-    "minVersion": "0.1.0"
+    "deviceCode": "<64-char random>",
+    "userCode": "ABCD-1234",
+    "verificationUri": "https://your-helpdesk-url/cli-link",
+    "verificationUriComplete": "https://your-helpdesk-url/cli-link?code=ABCD-1234",
+    "expiresIn": 600,
+    "interval": 5
   }
   ```
-  None of these values are secrets — they're OAuth identifiers that have
-  to be transmitted in plaintext anyway. They live in SystemConfig
-  (`int_csshd_*` keys) so they can be rotated without a binary rebuild
-  on the CLI side.
+  Rate limit: 20/min per IP to avoid grinding userCodes.
 
-- `POST /api/v1/auth/cli/whoami` — returns the authenticated user's
-  profile (id, name, email, role). Used by `csshd whoami`.
+- `POST /api/v1/cli/auth/poll` — body: `{ deviceCode }`. Returns one of:
+  - `200 { accessToken: "csshd_<random>", expiresAt }` — approved, return token (one time only; subsequent polls return 410).
+  - `428 { error: "authorization_pending" }` — still waiting.
+  - `410 { error: "expired_token" }` — session expired or already consumed.
+  - `403 { error: "access_denied" }` — user clicked Deny.
+  - `400 { error: "invalid_grant" }` — bad deviceCode.
 
-(Everything else uses existing `/api/v1/*` routes — those just need to
-accept Bearer tokens.)
+  CLI side: poll every `interval` seconds (with jitter), stop on terminal status.
 
-## Entra app registration
+### Authenticated (NextAuth session)
 
-The CLI auths to a *different* Entra app than the website OIDC login.
-Need to:
+- `GET /cli-link?code=ABCD-1234` — Next.js page. Looks up the session by userCode. Shows ticket-number-shaped userCode for confirmation, "Approve" / "Deny" buttons, expiration countdown, current user info ("You're approving access for nrobb@css-md.org").
+- `POST /api/v1/cli/auth/approve` — body: `{ userCode, name? }`. Marks session approved + linked to `session.user.id`, mints a token, returns `{ ok: true }`. Does NOT return the token to the browser; only the polling CLI gets it.
+- `POST /api/v1/cli/auth/deny` — body: `{ userCode }`. Marks session denied.
+- `GET /api/v1/cli/tokens` — list current user's CLI tokens (id, name, lastUsedAt, expiresAt, createdAt).
+- `POST /api/v1/cli/tokens/[id]/revoke` — set `revokedAt = now()`.
 
-1. Create a new App Registration in the CSS tenant (the existing OIDC app
-   is for confidential browser sessions; we want a public client for
-   device-code flow).
-2. Configure: Allow public client flows = Yes. Redirect URIs: none needed
-   for device flow.
-3. Expose an API: define a scope `Tickets.ReadWrite` (or similar) that
-   the CLI requests.
-4. Save Tenant ID + Application (client) ID + Application ID URI into
-   helpdesk SystemConfig (`int_csshd_tenant_id`, `int_csshd_client_id`,
-   `int_csshd_scope`).
+### Settings page
 
-**The csshd repo has no CSS-specific identifiers.** First-run flow:
-1. User runs `csshd login --helpdesk https://your-helpdesk-url`
-   (or interactive prompt).
-2. CLI fetches `<url>/.well-known/csshd-config`.
-3. CLI starts device-code flow with the returned tenant/client/scope.
-4. URL + config cached in `~/.config/csshd/config.toml`. Subsequent runs
-   use the cache; refresh on demand or on auth failure.
+- `/settings/cli-tokens` — list user's tokens with last-used timestamp + name + revoke button.
 
-The helpdesk side just validates `aud` matches the configured Application
-ID URI. No secrets on either side — device code flow doesn't use one.
+## Auth middleware
+
+In `src/lib/auth.ts` (or a wrapper), on each API call:
+
+1. If `Authorization` header starts with `Bearer csshd_`:
+   - SHA-256 the full token (`csshd_<random>`).
+   - Look up `CliToken` by hash.
+   - Reject if `revokedAt != null` or `expiresAt <= now`.
+   - Update `lastUsedAt = now()` (debounced — don't write on every request; once per minute is plenty).
+   - Attach `{ user: { ... } }` to the request the same shape `auth()` produces today.
+2. Otherwise, fall through to the existing NextAuth session cookie path.
+
+## Token format + storage
+
+- `csshd_<32 bytes base64url>` — distinct prefix means we can recognize at a glance and rate-limit unknown prefixes.
+- Stored hashed (SHA-256) — even a DB compromise doesn't yield usable tokens.
+- 90 day expiry. Auto-rotation can come later; v1 just expires.
+- `name` defaults to the user-agent + IP at first use; user can edit on `/settings/cli-tokens`.
+
+## Worker — token cleanup cron
+
+Add a daily worker (`cli-token-cleanup`) that deletes:
+- `CliAuthSession` rows past `expiresAt`.
+- `CliToken` rows where `revokedAt` is older than 30 days (audit retention).
 
 ## Test plan
 
-- Unit test the JWT validator with both valid + tampered tokens, expired
-  tokens, wrong issuer, wrong audience.
-- Integration test: spin up a mock JWKS, mint a test JWT, hit
-  `/api/v1/tickets` with the Bearer header, expect 200.
-- Verify cookie auth still works on the same routes (regression).
+Unit:
+- Token hashing round-trip.
+- userCode collision retry (insanely unlikely with ABCD-1234 entropy of ~16M, but guard it).
+- Middleware: bearer present → user attached; bearer revoked → 401; bearer expired → 401; no bearer → falls through to NextAuth.
+
+Integration:
+- Init → poll (pending) → approve → poll (returns token) → call API with token → returns user data.
+- Init → wait → expired.
+- Init → deny → poll → 403.
+- Token revoked → call API → 401.
+- Token name update via /settings/cli-tokens.
 
 ## Estimated effort
 
 ~half a day:
-- 30 min: create Entra app registration, document IDs in memory.
-- 2 h: bearer middleware, JWKS fetch+cache, validator.
-- 1 h: refactor `auth()` to layer bearer in front of NextAuth.
+- 30 min: schema migration + Prisma generate.
+- 1 h: init/poll/approve/deny route handlers + rate limit.
+- 1 h: bearer middleware in `auth.ts`.
+- 1 h: `/cli-link` approval page UI.
+- 30 min: `/settings/cli-tokens` management page.
+- 30 min: cleanup worker.
 - 1 h: tests.
-- 30 min: doc + journal entry.
 
-After Phase 0 lands, Phase 1 in `csshd` can proceed without further
-helpdesk-side changes.
+After Phase 0 lands, csshd Phase 1 in this repo can proceed without
+further helpdesk-side changes — the API surface for the CLI is just the
+existing `/api/v1/tickets/*`, `/api/v1/users/me`, etc., now accepting
+Bearer tokens alongside session cookies.

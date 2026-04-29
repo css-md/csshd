@@ -13,9 +13,9 @@ const ABOUT: &str = "Terminal client for the CSS IT Helpdesk.";
 #[command(name = "csshd", version, about = ABOUT, long_about = None)]
 struct Cli {
     /// Helpdesk base URL. On first run, set with `csshd login --helpdesk <url>`;
-    /// subsequent runs read it from the local config. The CLI fetches OAuth
-    /// identifiers from `<url>/.well-known/csshd-config` — nothing CSS-specific
-    /// is baked into this binary.
+    /// subsequent runs read it from the local config. The CLI talks only to
+    /// this URL — identity is brokered server-side, no IdP-specific identifiers
+    /// are baked into this binary.
     #[arg(long, env = "CSSHD_HELPDESK", global = true)]
     helpdesk: Option<String>,
 
@@ -25,9 +25,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Authenticate via OAuth 2.0 device-code flow. On first run, pass
-    /// `--helpdesk <url>` to bind this CLI to a helpdesk; identifiers
-    /// are then fetched from `<url>/.well-known/csshd-config`.
+    /// Authenticate. On first run, pass `--helpdesk <url>` to bind this CLI
+    /// to a helpdesk. The helpdesk shows an approval page in your browser;
+    /// once you click Approve, the CLI gets a token and stores it in the
+    /// OS keychain.
     Login,
     /// Forget stored credentials.
     Logout,
