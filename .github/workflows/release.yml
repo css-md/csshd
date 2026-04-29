@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux deps (keyring → libdbus)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (cargo)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          stage="csshd-${version}-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp README.md LICENSE SECURITY.md "$stage/"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "target/${{ matrix.target }}/release/csshd.exe" "$stage/"
+            7z a "${stage}.zip" "$stage" >/dev/null
+            echo "ARTIFACT=${stage}.zip" >> "$GITHUB_ENV"
+          else
+            cp "target/${{ matrix.target }}/release/csshd" "$stage/"
+            tar -czf "${stage}.tar.gz" "$stage"
+            echo "ARTIFACT=${stage}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Checksum
+        shell: bash
+        run: |
+          if command -v shasum >/dev/null; then
+            shasum -a 256 "$ARTIFACT" > "${ARTIFACT}.sha256"
+          else
+            sha256sum "$ARTIFACT" > "${ARTIFACT}.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+
+  release:
+    name: Publish release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage installer scripts
+        run: |
+          mkdir -p out
+          # Flatten matrix subdirs.
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) -exec cp {} out/ \;
+          # Patch installers with the tag so they fetch the right URLs.
+          tag="${GITHUB_REF_NAME}"
+          sed "s|__TAG__|${tag}|g" install.sh > out/csshd-installer.sh
+          sed "s|__TAG__|${tag}|g" install.ps1 > out/csshd-installer.ps1
+          chmod +x out/csshd-installer.sh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
