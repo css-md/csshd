@@ -4,7 +4,7 @@
 //! commands below; Phase 2 will add `csshd tui` (an interactive ratatui
 //! app) on top of the same client + auth modules.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use owo_colors::{OwoColorize, Stream::Stderr};
 
@@ -14,6 +14,7 @@ mod commands;
 mod config;
 mod credentials;
 mod format;
+mod tui;
 
 const ABOUT: &str = "Terminal client for the CSS IT Helpdesk.";
 
@@ -154,8 +155,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
             body,
             internal,
         } => commands::comment::run(&client, &ticket, body, internal).await,
-        Command::Tui => {
-            bail!("`csshd tui` is Phase 2 — not yet implemented. Use `csshd list` / `csshd view` for now.");
-        }
+        Command::Tui => tui::run(client).await,
     }
 }
