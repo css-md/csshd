@@ -13,13 +13,19 @@ permissions:
   security-events: write
 
 jobs:
-  gitleaks:
+  # Note: GitHub also runs its own native secret scanning on public repos
+  # (Settings → Code security → Secret scanning). This workflow is just
+  # belt-and-suspenders — catches commit-time pushes before merge.
+  trufflehog:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          # On main pushes, scan the full history (default depth: 0 = all).
+          # On PRs, the action auto-detects the diff range.
+          path: ./
+          extra_args: --results=verified,unknown
