@@ -122,25 +122,41 @@ impl Client {
     // ── tickets ─────────────────────────────────────────────────────────
 
     pub async fn list_tickets(&self, q: TicketQuery) -> Result<TicketsPage> {
-        let mut path = String::from("/api/v1/tickets?");
-        let mut qp = url::form_urlencoded::Serializer::new(String::new());
-        if let Some(s) = &q.status {
-            qp.append_pair("status", s);
+        // Build query as Vec<(&str, String)> and let reqwest handle encoding.
+        // Avoids url::form_urlencoded::Serializer, whose inner buffer holds a
+        // Cow<'_, [u8]> that's !Send — futures touching it can't cross thread
+        // boundaries (breaks tokio::spawn).
+        let mut params: Vec<(&str, String)> = Vec::with_capacity(5);
+        if let Some(s) = q.status {
+            params.push(("status", s));
         }
-        if let Some(a) = &q.assignee {
-            qp.append_pair("assignee", a);
+        if let Some(a) = q.assignee {
+            params.push(("assignee", a));
         }
-        if let Some(s) = &q.search {
-            qp.append_pair("q", s);
+        if let Some(s) = q.search {
+            params.push(("q", s));
         }
         if let Some(p) = q.page {
-            qp.append_pair("page", &p.to_string());
+            params.push(("page", p.to_string()));
         }
         if let Some(ps) = q.page_size {
-            qp.append_pair("pageSize", &ps.to_string());
+            params.push(("pageSize", ps.to_string()));
         }
-        path.push_str(&qp.finish());
-        self.req::<(), _>(Method::GET, &path, None).await
+
+        let mut rb = self.http.get(self.url("/api/v1/tickets")).query(&params);
+        if let Some(t) = &self.token {
+            rb = rb.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let res = rb.send().await.context("GET /api/v1/tickets")?;
+        let status = res.status();
+        if status == StatusCode::UNAUTHORIZED {
+            bail!("Unauthorized — run `csshd login` to refresh credentials.");
+        }
+        if status.is_client_error() || status.is_server_error() {
+            let body = res.text().await.unwrap_or_default();
+            bail!("GET /api/v1/tickets ({status}): {body}");
+        }
+        Ok(res.json::<TicketsPage>().await.context("decoding tickets")?)
     }
 
     pub async fn get_ticket(&self, id_or_number: &str) -> Result<Ticket> {
