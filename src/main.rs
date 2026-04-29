@@ -1,11 +1,19 @@
 //! csshd — terminal client for the CSS IT Helpdesk.
 //!
-//! This is the v0.1 scaffold. Commands print "not yet implemented" until
-//! Phase 1 wires up authentication and the API client. See README.md for
-//! roadmap.
+//! See README.md for the design overview. Phase 1 covers the plumbing
+//! commands below; Phase 2 will add `csshd tui` (an interactive ratatui
+//! app) on top of the same client + auth modules.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
+use owo_colors::{OwoColorize, Stream::Stderr};
+
+mod auth;
+mod client;
+mod commands;
+mod config;
+mod credentials;
+mod format;
 
 const ABOUT: &str = "Terminal client for the CSS IT Helpdesk.";
 
@@ -13,11 +21,13 @@ const ABOUT: &str = "Terminal client for the CSS IT Helpdesk.";
 #[command(name = "csshd", version, about = ABOUT, long_about = None)]
 struct Cli {
     /// Helpdesk base URL. On first run, set with `csshd login --helpdesk <url>`;
-    /// subsequent runs read it from the local config. The CLI talks only to
-    /// this URL — identity is brokered server-side, no IdP-specific identifiers
-    /// are baked into this binary.
+    /// subsequent runs read it from the local config.
     #[arg(long, env = "CSSHD_HELPDESK", global = true)]
     helpdesk: Option<String>,
+
+    /// Output JSON instead of human-friendly text. Pipe-friendly.
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -25,10 +35,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Authenticate. On first run, pass `--helpdesk <url>` to bind this CLI
-    /// to a helpdesk. The helpdesk shows an approval page in your browser;
-    /// once you click Approve, the CLI gets a token and stores it in the
-    /// OS keychain.
+    /// Authenticate. Pass --helpdesk on first run; subsequent runs remember.
     Login,
     /// Forget stored credentials.
     Logout,
@@ -36,15 +43,21 @@ enum Command {
     Whoami,
     /// List tickets.
     List {
-        /// Filter by status (open, in_progress, pending, resolved, closed).
+        /// Filter by status (OPEN, IN_PROGRESS, PENDING, RESOLVED, CLOSED). Case-insensitive.
         #[arg(long)]
         status: Option<String>,
         /// Only show tickets assigned to me.
         #[arg(long)]
         mine: bool,
-        /// Filter by assignee user ID or email.
+        /// Filter by assignee user id or "me".
         #[arg(long)]
         assignee: Option<String>,
+        /// Search query (matches title/description).
+        #[arg(long, short = 'q')]
+        search: Option<String>,
+        /// Page size (default: 50).
+        #[arg(long)]
+        limit: Option<u32>,
     },
     /// Show a single ticket in detail.
     View {
@@ -68,27 +81,81 @@ enum Command {
         #[arg(long)]
         internal: bool,
     },
-    /// Open the interactive TUI (Phase 2).
+    /// Open the interactive TUI (Phase 2 — not yet implemented).
     Tui,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Login => not_yet("login"),
-        Command::Logout => not_yet("logout"),
-        Command::Whoami => not_yet("whoami"),
-        Command::List { .. } => not_yet("list"),
-        Command::View { .. } => not_yet("view"),
-        Command::Claim { .. } => not_yet("claim"),
-        Command::Close { .. } => not_yet("close"),
-        Command::Comment { .. } => not_yet("comment"),
-        Command::Tui => not_yet("tui"),
+
+    if let Err(e) = dispatch(cli).await {
+        eprintln!(
+            "{} {e}",
+            "error:"
+                .if_supports_color(Stderr, |s| s.bold().red().to_string())
+        );
+        // Print the chain in dimmed text so users see *why*.
+        let mut src = e.source();
+        while let Some(s) = src {
+            eprintln!("  {} {s}", "↳".if_supports_color(Stderr, |s| s.dimmed().to_string()));
+            src = s.source();
+        }
+        std::process::exit(1);
     }
+    Ok(())
 }
 
-fn not_yet(cmd: &str) -> Result<()> {
-    eprintln!("csshd: `{cmd}` is not yet implemented (v0.1 scaffold). See https://github.com/css-md/csshd for the roadmap.");
-    std::process::exit(2);
+async fn dispatch(cli: Cli) -> Result<()> {
+    // login is special: it writes the helpdesk URL to config, doesn't need
+    // credentials yet, and must NOT pre-resolve a token.
+    if let Command::Login = cli.command {
+        return commands::login::run(cli.helpdesk).await;
+    }
+    if let Command::Logout = cli.command {
+        return commands::logout::run().await;
+    }
+
+    // Everything else needs a configured helpdesk + a stored token.
+    let cfg = config::load().unwrap_or_default();
+    let helpdesk = config::resolve_helpdesk(cli.helpdesk.clone(), &cfg)?;
+    let token = credentials::load_token(&helpdesk)?
+        .ok_or_else(|| anyhow::anyhow!("Not signed in. Run `csshd login`."))?;
+    let client = client::Client::new(&helpdesk, Some(token))?;
+
+    match cli.command {
+        Command::Login | Command::Logout => unreachable!(),
+        Command::Whoami => commands::whoami::run(&client, cli.json).await,
+        Command::List {
+            status,
+            mine,
+            assignee,
+            search,
+            limit,
+        } => {
+            commands::list::run(
+                &client,
+                commands::list::ListOpts {
+                    status,
+                    mine,
+                    assignee,
+                    search,
+                    page_size: limit,
+                    json: cli.json,
+                },
+            )
+            .await
+        }
+        Command::View { ticket } => commands::view::run(&client, &ticket, cli.json).await,
+        Command::Claim { ticket } => commands::claim::run(&client, &ticket).await,
+        Command::Close { ticket } => commands::close::run(&client, &ticket).await,
+        Command::Comment {
+            ticket,
+            body,
+            internal,
+        } => commands::comment::run(&client, &ticket, body, internal).await,
+        Command::Tui => {
+            bail!("`csshd tui` is Phase 2 — not yet implemented. Use `csshd list` / `csshd view` for now.");
+        }
+    }
 }
