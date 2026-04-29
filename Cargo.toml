@@ -31,7 +31,7 @@ webbrowser = "1"
 
 # TUI (Phase 2 — pulled in early so the workspace resolves consistently)
 ratatui = { version = "0.28", default-features = false, features = ["crossterm"] }
-crossterm = "0.28"
+crossterm = "0.29"
 
 [profile.release]
 lto = "thin"
