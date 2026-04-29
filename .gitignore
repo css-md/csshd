@@ -1,0 +1,21 @@
+/target
+Cargo.lock.bak
+*.swp
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# cargo-dist
+/dist/
+
+# Belt-and-suspenders: never commit anything that looks like local config
+# or credentials. csshd writes runtime config to OS-XDG dirs, not the repo,
+# so any of these appearing here would be a mistake.
+.env
+.env.*
+*.pem
+*.key
+config.toml
+config.local.toml
