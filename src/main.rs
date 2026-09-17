@@ -78,7 +78,7 @@ enum Command {
         #[arg(long)]
         internal: bool,
     },
-    /// Open the interactive TUI (Phase 2 — not yet implemented).
+    /// Open the interactive TUI.
     Tui,
 }
 

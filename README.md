@@ -2,7 +2,9 @@
 
 Terminal client for the CSS IT Helpdesk. Triage, claim, comment on, and close tickets from your shell — and run a real TUI when you want to live in it.
 
-> ⚠️ **v0.1 scaffold.** Commands currently print "not yet implemented." Phase 1 (real auth + ticket commands) is the next milestone. See **Roadmap** below.
+> **Status:** Phases 1 and 2 are implemented and the helpdesk side (device-code
+> auth) is deployed. Not yet tagged for release — build from source for now.
+> See **Roadmap** below for what's left.
 
 ## Install
 
@@ -20,7 +22,10 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/css-md/csshd/releases/l
 powershell -ExecutionPolicy ByPass -c "irm https://github.com/css-md/csshd/releases/latest/download/csshd-installer.ps1 | iex"
 ```
 
-The installer drops a `csshd` binary in `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) and tells you to add it to PATH if it isn't already.
+The installers verify the release checksum and refuse to install without it.
+They drop the binary in `~/.local/bin` (Linux/macOS) or
+`%USERPROFILE%\.csshd\bin` (Windows), and add it to PATH — or tell you how.
+Override the location with `CSSHD_INSTALL_DIR`.
 
 **Cargo (if you have Rust installed):**
 
@@ -70,21 +75,24 @@ csshd tui                       # interactive ratatui app (Phase 2)
 
 ## Roadmap
 
-**Phase 0 (helpdesk-side, blocks Phase 1):**
-- Helpdesk-issued bearer tokens. Device-code flow (`/api/v1/cli/auth/init` + `/cli-link` approval page + `/api/v1/cli/auth/poll`), opaque `csshd_…` tokens stored hashed, middleware that accepts them on `/api/v1/*` alongside the existing NextAuth session cookies. Revocation UI at `/settings/cli-tokens`. See `plans/PHASE-0-helpdesk-bearer-auth.md` for the full spec.
+**Phase 0 (helpdesk-side) — shipped 2026-06-02.**
+- Helpdesk-issued bearer tokens. Device-code flow (`/api/v1/cli/auth/init` + `/cli-link` approval page + `/api/v1/cli/auth/poll`), opaque `csshd_…` tokens stored hashed, middleware that accepts them on `/api/v1/*` alongside the existing NextAuth session cookies. Revocation UI at `/settings/cli-tokens`. All of it is live in
+`css-md/csshelpdesk`; `plans/PHASE-0-helpdesk-bearer-auth.md` is kept as the
+original spec.
 
-**Phase 1 — plumbing CLI (this repo, ~1 week of focused work):**
-- OIDC device-code login against Entra; refresh on demand.
-- HTTP client wrapping `/api/v1/*` with typed structs.
-- `list` / `view` / `claim` / `close` / `comment` / `whoami`.
-- Output formats: human (default), `--json` for piping.
-- Shell completions: `csshd completions bash|zsh|fish|powershell`.
+**Phase 1 — plumbing CLI — done**, except shell completions:
+- ✅ Helpdesk-brokered device-code login (not Entra directly — see Architecture).
+- ✅ HTTP client wrapping `/api/v1/*` with typed structs.
+- ✅ `list` / `view` / `claim` / `close` / `comment` / `whoami`.
+- ✅ Output formats: human (default), `--json` for piping.
+- ⬜ Shell completions: `csshd completions bash|zsh|fish|powershell`.
 
-**Phase 2 — real TUI (~1 week):**
-- `csshd tui` — ratatui app. Ticket list left, detail right.
-- Vim-style nav: `j/k`/`Enter`/`r`/`/search`/`q`.
-- Live updates via the helpdesk's existing SSE channel.
-- `$EDITOR` for replies; rich diff for edits.
+**Phase 2 — real TUI — done**, except live updates:
+- ✅ `csshd tui` — ratatui app. Ticket list left, detail right.
+- ✅ Vim-style nav: `j/k`/`Enter`/`r`/`/search`/`q`, plus mouse.
+- ✅ `$EDITOR` for replies.
+- ⬜ Live updates via the helpdesk's existing SSE channel (polls every 30s
+  today).
 
 **Phase 3 — polish:**
 - Saved views (`csshd view-saved hot`, `csshd view-saved mine-pending`).
@@ -108,15 +116,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # macOS / Linux
 
 cargo build                            # build
 cargo run -- login                     # run
-cargo test                             # tests (none yet)
-cargo clippy --all-targets             # lint
+cargo test                             # tests
+cargo clippy --all-targets             # lint (CI runs this with -D warnings)
 cargo fmt --check                      # format
-
-# Set up cargo-dist (one-time, unblocks the release pipeline):
-cargo install cargo-dist
-cargo dist init
-git add .github/workflows/release.yml dist-workspace.toml
-git commit -m "ci: cargo-dist release pipeline"
 
 # Cut a release:
 git tag v0.1.0 && git push --tags
@@ -127,7 +129,12 @@ git tag v0.1.0 && git push --tags
 - **Auth:** Helpdesk-brokered device-code flow. The CLI talks only to the helpdesk; the helpdesk handles whatever identity provider it wants behind the scenes. Tokens are opaque `csshd_…` strings stored in OS keychain via [`keyring`](https://crates.io/crates/keyring). Helpdesk-issued, helpdesk-revocable.
 - **HTTP:** [`reqwest`](https://crates.io/crates/reqwest) with `rustls-tls` (no OpenSSL dep, simpler cross-compile).
 - **TUI:** [`ratatui`](https://ratatui.rs) + [`crossterm`](https://crates.io/crates/crossterm).
-- **Distribution:** [`cargo-dist`](https://github.com/axodotdev/cargo-dist) cross-compiles for `x86_64-{linux,macos,windows}` and `aarch64-{linux,macos}`, generates installer scripts, and publishes via GitHub Releases on git tag.
+- **Distribution:** a hand-rolled `release.yml` cross-compiles for
+  `x86_64-{linux,macos,windows}` and `aarch64-macos`, checksums each artifact,
+  and publishes via GitHub Releases on git tag. `aarch64-linux` is disabled
+  pending a libdbus fix in the `cross` image. (`cargo-dist` was evaluated and
+  not adopted; the leftover `[package.metadata.dist]` block in `Cargo.toml` is
+  inert.)
 
 ## License
 

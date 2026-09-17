@@ -45,9 +45,17 @@ trap 'rm -rf "$tmp"' EXIT
 
 printf 'csshd: downloading %s\n' "$url"
 curl --proto '=https' --tlsv1.2 -fLsS "$url" -o "$tmp/$archive"
-curl --proto '=https' --tlsv1.2 -fLsS "$sha_url" -o "$tmp/$archive.sha256" || true
-
-if [ -f "$tmp/$archive.sha256" ]; then
+# Fail closed: a release without a readable checksum is not installed. Set
+# CSSHD_SKIP_CHECKSUM=1 only if you have verified the download another way.
+if ! curl --proto '=https' --tlsv1.2 -fLsS "$sha_url" -o "$tmp/$archive.sha256"; then
+  if [ "${CSSHD_SKIP_CHECKSUM:-0}" = "1" ]; then
+    printf 'csshd: checksum unavailable, continuing (CSSHD_SKIP_CHECKSUM=1)\n' >&2
+  else
+    printf 'csshd: could not fetch %s — refusing to install unverified.\n' "$sha_url" >&2
+    printf 'csshd: set CSSHD_SKIP_CHECKSUM=1 to override.\n' >&2
+    exit 1
+  fi
+else
   printf 'csshd: verifying checksum\n'
   expected=$(awk '{print $1}' "$tmp/$archive.sha256")
   if command -v shasum >/dev/null 2>&1; then
