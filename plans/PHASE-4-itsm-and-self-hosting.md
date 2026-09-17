@@ -24,11 +24,10 @@ de-CSS-ing the client, adding `csshd asset …`, and a TUI screen.
 So the sequencing below is written for both repos, and the CLI work is
 explicitly dependent.
 
-> Note for whoever picks this up: the private server repo wasn't reachable from
-> the session that wrote this doc, so everything below about CSSHelpdesk's
-> internals is inferred from `plans/PHASE-0-helpdesk-bearer-auth.md`,
-> `src/client.rs`, and the README's "conscious omissions" list. Verify before
-> building.
+> Revised 2026-09-17 against `css-md/csshelpdesk` @ `9f56469`. The first draft
+> of this doc was written without access to the server and guessed at its
+> internals; several guesses were wrong, most importantly the assumption that
+> asset management didn't exist yet. Corrected throughout.
 
 ## Part 1 — The contract (do this first, it unblocks everything)
 
@@ -92,152 +91,156 @@ the README" and generic.
 
 ## Part 2 — Asset management
 
-### 2.1 Scope discipline
+### 2.1 You already have half of this
 
-Do **not** try to be ITIL-complete. "ITSM" as a checkbox list (incident,
-problem, change, release, config, service catalog, CMDB, SLA) is how this
-turns into a three-year project that never ships. The ordering below front-loads
-the part that delivers nearly all the operational value.
+The first draft of this plan proposed building an asset system from scratch.
+That was wrong — `csshelpdesk` already ships:
 
-### Tier 1 — Inventory + ticket linkage (ship this, then stop and use it)
+- an **`Asset` model** with `AssetStatus` (ACTIVE / INACTIVE / LOST / RETIRED /
+  SPARE), Intune + PDQ external IDs, hostname, serial, make/model, OS, assigned
+  user, site, `assetTag`, `manualNotes`, and an `extraFields` JSON escape hatch;
+- **`/api/v1/assets`**, `/assets/[id]` and `/assets/export`, with
+  status/site/assignedUser/search/pagination filters;
+- a full **web UI** — list, detail, actions, column filters, search, CSV export,
+  sync button;
+- **four sync workers** — `intune-sync`, `pdq-sync`, `chromeos-sync`,
+  `simplemdm-sync`;
+- **`Ticket.assetId`**, so tickets already link to the device they're about, and
+  the ticket list already filters by `assetId`;
+- **`AuditLog`** with a dedicated `assetId` FK and `entityType: "asset"`, so
+  there's already a history spine.
 
-```prisma
-model Asset {
-  id            String   @id @default(cuid())
-  assetTag      String   @unique      // human/barcode: "CSS-A-00412"
-  serial        String?
-  category      String                // laptop | tablet | display | printer | network | phone | av | other
-  make          String?
-  model         String?
-  status        String                // IN_STOCK | DEPLOYED | IN_REPAIR | LOANED | RETIRED | LOST
-  assignedToId  String?               // -> User
-  siteId        String?               // reuse the Site model tickets already have
-  location      String?               // room / closet / shelf
-  purchaseDate  DateTime?
-  purchaseCost  Decimal?
-  poNumber      String?
-  fundingSource String?               // grants and capital budgets matter in schools/nonprofits
-  supplier      String?
-  warrantyEndsAt DateTime?
-  notes         String?
-  customFields  Json?                 // the escape hatch every self-hoster needs on day one
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  @@index([status]) @@index([assignedToId]) @@index([siteId]) @@index([serial])
-}
+So the real question isn't "how do we build asset management." It's **"what is
+missing before this counts as ITSM rather than an MDM mirror?"**
 
-model AssetEvent {                     // append-only. Never update, never delete.
-  id        String   @id @default(cuid())
-  assetId   String
-  type      String   // CHECK_OUT | CHECK_IN | MOVE | STATUS_CHANGE | REPAIR | AUDIT | RETIRE | NOTE
-  actorId   String   // who did it
-  subjectId String?  // who it was checked out to, for CHECK_OUT
-  fromValue String?
-  toValue   String?
-  note      String?
-  at        DateTime @default(now())
-  @@index([assetId, at])
-}
+### 2.2 What's actually missing
 
-model AssetTicketLink {
-  assetId  String
-  ticketId String
-  @@id([assetId, ticketId])
-}
-```
+Everything currently in `Asset` is a *reflection of what an MDM already knows*.
+None of it is what a helpdesk actually needs to answer budget and lifecycle
+questions. The gaps, roughly in value order:
 
-Two things here earn their keep more than anything else:
+1. **Procurement and finance fields.** No `purchaseDate`, `purchaseCost`,
+   `poNumber`, `supplier`, `warrantyEndsAt`, or funding source. Without these
+   you can't do warranty lookup at the point of repair, refresh-cycle
+   forecasting, or the grant/capital reporting a non-profit actually needs.
+   This is the single highest-value addition and it's ~8 additive nullable
+   columns.
+2. **Lifecycle states the current enum can't express.** ACTIVE/INACTIVE/LOST/
+   RETIRED/SPARE has no way to say *in for repair*, *loaned out*, or *in stock
+   vs. deployed* — which is most of what a helpdesk asset workflow is. Extend
+   the enum (additive) rather than repurposing `manualNotes`.
+3. **Check-out / check-in as a first-class action.** Assignment today is a
+   nullable `assignedUserId` you overwrite. There's no loan, no expected-return
+   date, no bulk September/June handoff. `AuditLog` captures *that* it changed
+   if the route writes an entry, but "who had this in March, and did they
+   return it" is a query nobody wants to reconstruct from `beforeState` JSON.
+   Consider a purpose-built `AssetAssignment` (open/closed intervals) rather
+   than leaning on the generic audit log for a domain workflow.
+4. **CSV import.** There's an `/assets/export` and no import. Every self-hoster
+   and every non-MDM asset class (monitors, projectors, furniture, AV) starts
+   in a spreadsheet. This is the adoption gate.
+5. **Non-MDM assets generally.** Every field is oriented around a device that
+   Intune or PDQ reports. An asset with no `intuneDeviceId` is a second-class
+   citizen. Worth an explicit "manually tracked" path, including generated
+   asset tags.
+6. **A reconciliation rule.** With four sync sources writing to one row, decide
+   and document which fields are sync-authoritative (hostname, OS, serial) and
+   which are local-authoritative (assignment, notes, finance, location) — and
+   make the UI show which is which. Mixing them silently is how people stop
+   trusting the inventory.
+7. **Consumables and licenses.** Seat counts and renewal dates, as a separate
+   simpler model. Don't force them into `Asset`.
 
-- **`AssetEvent` is append-only.** Every asset system that stores only current
-  state gets asked "who had this in March?" within a year and can't answer.
-  Write the history from day one; it's cheap now and impossible to backfill.
-- **`AssetTicketLink` is the reason to build this inside the helpdesk** rather
-  than buying Snipe-IT and pointing at it. It's what gives you "every ticket
-  this device ever generated" on the asset page and "which model accounts for
-  40% of our repair tickets" in reporting. If you skip the linkage, you have
-  built a worse spreadsheet.
+Notably **not** missing, and not worth building: a generic inventory system,
+another sync integration, or a separate CMDB. The bones are fine.
 
-### Tier 2 — The things that decide whether anyone adopts it
+### 2.3 What to skip
 
-- **CSV import/export with a dry-run.** Everyone's inventory starts in a
-  spreadsheet. Import is the adoption gate, not a nice-to-have.
-- **Barcode / asset-tag printing and scan-to-lookup.** For a 1:1 device
-  program this *is* the daily workflow — scan the tag, see the student,
-  see the open ticket.
-- **Bulk check-out/check-in.** September and June are the whole year.
-- **Warranty and EOL reporting** → refresh-cycle forecasting, which is what
-  gets the budget conversation.
-- **Consumables and licenses** as a separate, simpler model (seat counts,
-  renewal dates) — don't force them into `Asset`.
+Do **not** chase ITIL completeness. Change management, problem records, service
+catalog and a relationship-graph CMDB are where this turns into a three-year
+project. The one Tier-3 item that probably outranks all of them is **SLA
+policies with breach timers** — and that belongs to tickets, not assets.
 
-### Tier 3 — Only on demand
+### 2.4 The CLI surface (this repo's actual work)
 
-CMDB relationships (asset depends-on asset, service → CI), change requests with
-approvals and maintenance windows, problem records over recurring incidents,
-service catalog. SLA policies are the exception — they belong to tickets, not
-assets, and are probably worth more than all of Tier 3 combined.
-
-### 2.2 Sync sources
-
-Don't hardcode an importer. Define a small importer interface (pull → normalize
-→ reconcile by serial → report drift) and implement against it. Realistic first
-sources for a district: Intune/Entra devices, Google Admin SDK Chrome devices,
-Jamf. A self-hoster with none of those still has CSV, which is why CSV comes
-first.
-
-Reconciliation rule worth deciding up front: imported fields are
-server-authoritative and locally uneditable; everything else (assignment,
-location, funding) is local. Mixing them is how these systems become untrusted.
-
-### 2.3 The CLI surface (this repo's actual work)
+Cheaper than the first draft assumed, because `/api/v1/assets` already exists
+and already has the filters:
 
 ```
-csshd asset list [--status] [--site] [--category] [--assigned me|<user>] [-q]
-csshd asset view <tag|serial|id>
-csshd asset checkout <asset> --to <user> [--note]
-csshd asset checkin  <asset> [--status IN_STOCK]
-csshd asset move     <asset> --site <site> [--location <room>]
-csshd asset link     <asset> <ticket>
-csshd asset history  <asset>
-csshd asset import   inventory.csv [--dry-run]
+csshd asset list [--status] [--site] [--assigned me|<user>] [-q]
+csshd asset view <tag|serial|hostname|id>
+csshd asset history <asset>            # reads /api/v1/audit-log
+csshd asset link <asset> <ticket>      # PATCH /tickets/{id} { assetId }
 ```
 
-`csshd view <ticket>` grows a "Linked assets" block. `--json` throughout.
+`list` and `view` are implementable **today** against the deployed API with no
+server change. `csshd view <ticket>` should also render the linked asset — the
+detail route already includes `asset: { id, hostname, make, model, assetTag }`.
+Check-out/check-in commands wait on 2.2.3.
 
 **TUI note:** the current `Pane` enum (`List | Detail | Search | Help`) is a
-flat 4-variant state machine with ticket geometry baked into `draw()`. Assets
-need a screen-level concept above it — `Screen::{Tickets, Assets}` with panes
-underneath, and `draw()` split per screen. Better to do that refactor as its
-own commit before adding asset rendering, not tangled with it.
+flat state machine with ticket geometry baked into `draw()`. Assets need a
+screen-level concept above it — `Screen::{Tickets, Assets}` with panes
+underneath. Do that refactor as its own commit before adding asset rendering.
 
 ## Part 3 — Actually self-hostable
 
 ### 3.1 Server (the real gate — none of this is in this repo)
 
-1. **Pick an OSS license for CSSHelpdesk and make the repo public.** Until this
-   happens, everything else in Part 3 is theoretical. This is the decision, not
-   a task.
-2. **Docker Compose**: app + Postgres + a single `.env`, `docker compose up`
-   to a working instance. This is the bar people judge self-hostability by,
-   and they judge it in about ninety seconds.
-3. **Pluggable auth.** Entra is currently load-bearing. Needs: generic OIDC
-   (issuer/client id/secret from env), plus email+password or magic-link for
-   small shops with no IdP. NextAuth supports this; the work is config, not
-   invention.
-4. **First-run setup wizard**: org name, ticket prefix, first admin, sites.
-   Everything the discovery document exposes should be settable here.
-5. **Ship Prisma migrations, not `db push`**, with a documented upgrade path.
-   Self-hosters upgrade on their own schedule and will be several versions
-   behind.
-6. **Move CSS-specific domains behind feature flags.** The README's "conscious
-   omissions" already names House Assignments as a CSS-only domain with its own
-   print-roster UI — that's exactly the kind of thing that should be a disabled
-   module in a generic install, alongside the CSS SIS integration and support
-   tiers.
-7. **De-brand**: logos, colors, copy, and the email templates.
-8. **Operational docs**: backup/restore, upgrade, reverse proxy + TLS, SMTP,
-   env var reference. Plus a demo instance with seeded data, which is worth
-   more than any amount of README.
+Better news than the first draft assumed: there is already a `Dockerfile`, a
+`Dockerfile.worker`, a 5 KB `docker-compose.yml`, a 7 KB `.env.example` and a
+`railway.toml`. The packaging bones exist. What's missing is that none of it
+currently works for someone who isn't CSS.
+
+**1. The migration history is broken, and it silently breaks fresh installs.**
+This is the first thing to fix and it's not a nice-to-have.
+
+- `prisma/migrations/` covers **30 tables**; the schema declares **39 models**.
+- **15 models exist in no migration at all** — including `CliToken` and
+  `CliAuthSession` (so Phase 0 itself), plus `TicketParticipant`,
+  `TicketMerge`, `CannedResponse`, `TicketTemplate`, all four Helpbot tables,
+  `CredentialMonitor`, `NotificationPreference`/`Log`, the cluster tables.
+- The last migration is dated **2026-03-27**. Everything since has gone in via
+  `db push`: `.github/workflows/deploy.yml:203` runs
+  `prisma db push --skip-generate` on every deploy.
+- But `docker-compose.yml:64` starts the app with **`prisma migrate deploy`**.
+
+For CSS's prod box those two paths coexist by accident — `db push` keeps the
+live database correct and `migrate deploy` finds nothing to do. For anyone
+doing `docker compose up` on an empty database, only the compose path runs, so
+they get a schema stuck in March 2026 and an app that dies on the first query
+against a missing table. **Self-hosting is currently impossible, and this is
+why.** The fix is to squash the current schema into a fresh baseline migration
+and make `db push` a dev-only tool.
+
+**2. Pick an OSS license and make the repo public.** Until this happens
+everything else here is theoretical. It's a decision, not a task.
+
+**3. The environment surface is ~48 variables, most of them CSS-specific.**
+`.env.example` demands Azure AD *and* Azure Graph credentials, Google Workspace
+service-account + domain + customer ID, three named Entra group IDs
+(`ENTRA_SEIA_GROUP_ID`, `ENTRA_SRIA_GROUP_ID`,
+`ENTRA_RESIDENTIAL_SUPERVISORS_GROUP_ID`), PDQ, SimpleMDM, a GCS bucket, SSH
+keys for gateways, an AI gateway key, and a separate bridge service with its own
+HMAC secret. A self-hoster needs a **tiered** env file: a handful of required
+vars (database, Redis, auth secret, URL) and everything else behind an
+explicitly-disabled integration.
+
+**4. Pluggable auth.** Entra is load-bearing. Needs generic OIDC plus
+email/password or magic-link for shops with no IdP. NextAuth already supports
+this; the work is config, not invention.
+
+**5. Make the CSS-specific domains optional modules.** Residential clusters and
+house assignments, Protect gateways + Tailscale SSH, the gbridge email service,
+`ALLOWED_EMAIL_DOMAIN`, credential monitoring — all valuable to CSS, all
+meaningless to a generic install, and several are currently unconditional.
+
+**6. First-run setup wizard**: org name, ticket prefix, first admin, sites. The
+`SystemConfig` table already exists to hold the answers.
+
+**7. De-brand and document**: logos, colors, email templates, plus
+backup/restore, upgrade, reverse proxy, and SMTP docs. A seeded demo instance is
+worth more than any amount of README.
 
 ### 3.2 Naming
 
@@ -265,14 +268,14 @@ Everything in Part 1.3, plus:
 
 | Step | Where | Why it's here |
 |---|---|---|
-| 0 | both | Confirm Phase 0 shipped and csshd works end-to-end. Everything below assumes a working client. |
+| 0 | csshd | ~~Confirm Phase 0 shipped~~ — done, it has. Smoke-test `login`/`list --mine` against prod now that the `assignedTo` fix has landed. |
 | 1 | csshd | Assessment items 1-5 — tests, CI teeth, honest docs. |
 | 2 | server | OpenAPI spec + `/.well-known/helpdesk`. |
 | 3 | csshd | Consume discovery; delete every hardcoded `CSS-`, status and priority string. |
-| 4 | server | License decision + Docker Compose + pluggable auth. The gate for Part 3. |
-| 5 | server | Asset Tier 1: model, CRUD, `AssetEvent`, ticket linkage, web UI. |
-| 6 | csshd | `Screen` refactor, then `csshd asset …`. |
-| 7 | server | Asset Tier 2: CSV import, barcodes, bulk ops, warranty reporting. |
+| 4 | server | **Baseline migration squash** (fresh installs are broken today), then license decision + tiered env + pluggable auth. |
+| 5 | server | Asset finance/lifecycle fields + status enum + check-out/in (§2.2). Model, API and UI already exist. |
+| 6 | csshd | `asset list`/`view` (possible today), then the `Screen` refactor. |
+| 7 | server | CSV import, barcodes, bulk ops, warranty reporting. |
 | 8 | — | Stop. Use it for a term. Let real demand pick from Tier 3. |
 
 Steps 2 and 4 are the ones that actually decide whether this becomes a product

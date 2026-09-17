@@ -9,21 +9,51 @@ worth remembering when reading the "done" markers below.
 The code is in better shape than the docs. Phases 1 and 2 are actually
 implemented (login, whoami, list, view, claim, close, comment, and a working
 ratatui app), `cargo check` is clean, and clippy only has 6 cosmetic
-warnings. What's rotten is the connective tissue: **zero tests, docs that
-describe a design the code abandoned, and a hard dependency on a server-side
-change (Phase 0) that this repo has no evidence ever shipped.**
+warnings. What's rotten is the connective tissue: **near-zero tests, docs that
+describe a design the code abandoned, and — now verified — one query parameter
+that silently breaks the headline command in the README.**
 
-The single most important question before any new feature work:
+## Verified against the live server
 
-> **Has csshd ever completed a `login` against the real helpdesk?**
+The first version of this doc asked whether Phase 0 had ever shipped, because
+this repo had no way to know. It has: `css-md/csshelpdesk` @ `9f56469`
+(2026-06-02, *"Phase 0 prod deploy"*) contains every piece —
+`CliAuthSession` + `CliToken` models, all four `/api/v1/cli/auth/*` routes,
+`/api/v1/cli/whoami`, `/api/v1/cli/tokens`, the `/cli-link` approval page,
+`/settings/cli-tokens`, and the `cli-token-cleanup` worker. The server side of
+csshd is done and deployed.
 
-Phase 0 (`plans/PHASE-0-helpdesk-bearer-auth.md`) is the server-side
-device-code flow, and the plan says in its own words that it *blocks* Phase 1.
-Phase 1 and Phase 2 were both built on 2026-04-29 regardless. If Phase 0 never
-landed in `css-md/CSSHelpdesk`, then ~2,100 lines of client code have never
-been exercised against a live server and every DTO in `src/client.rs` is a
-guess. Answer that first — it changes the priority of everything else on this
-list.
+So the DTOs could finally be checked against the real route handlers rather
+than assumed. Result — **one real bug, everything else sound:**
+
+| csshd assumes | Server actually does | |
+|---|---|---|
+| `GET /tickets?assignee=` | reads **`assignedTo`** | ✗ **broken** |
+| `GET /tickets` → `{tickets,total,page,pageSize}` | matches (plus `totalPages`) | ✓ |
+| `POST /cli/auth/poll` → 428 pending / 200 / 410 / 403 | exactly that, plus `400 invalid_grant` | ✓ |
+| `GET /cli/whoami` → id,email,name,displayName,role,isActive,team,ooo\* | field-for-field identical | ✓ |
+| `PATCH /tickets/{id}` `{assignedAgentId,status}` | both in `UpdateTicketSchema` | ✓ |
+| `POST /tickets/{id}/comments` `{body,isInternal}` | matches | ✓ |
+| search matches ticket numbers | `ticketNumber: { contains }` | ✓ |
+
+**The bug:** `src/client.rs` sent `assignee`, but `/api/v1/tickets` reads
+`assignedTo` (only `/api/v1/tickets/export` uses `assignee`). Next.js silently
+ignores unrecognized query params, so there was no error — `csshd list --mine`
+and `--assignee=x` just returned **every ticket in the system**. That's the
+exact command the README's first-run section tells people to type. Fixed in
+this branch, with the repo's first three unit tests pinning it.
+
+Two things that are not bugs but are worth knowing:
+
+- **`claim` can 409.** The PATCH route guards assigning to an out-of-office
+  agent and requires `oooOverride: true` from a manager. The CLI has no flag
+  for it, and surfaces the server's message — which reads fine, but `csshd
+  claim` is simply unavailable against an OoO agent.
+- **`resolve_ticket` is mildly fragile.** It searches and filters client-side,
+  but sends no `pageSize`, so it gets the server default of 25 rows ordered by
+  priority. A ticket number that also appears in 25+ other tickets'
+  descriptions could fall off the end. Pass a larger `pageSize`, or ask for a
+  real number→id lookup endpoint.
 
 ## Defects
 
@@ -76,9 +106,11 @@ list.
 
 ### Generalization blockers (these matter for the self-host goal)
 
-8. **`CSS-` is hardcoded.** `src/client.rs:210` and `:217` strip the literal
-   prefix and re-pad to exactly 5 digits. Any other install's ticket numbers
-   are unresolvable.
+8. **`CSS-` is hardcoded** — on both sides. `src/client.rs:210`/`:217` strip
+   the literal prefix and re-pad to 5 digits; the server does the same in
+   `src/lib/utils.ts:25` and four places in `src/lib/bridge-email.ts`. The
+   server already has a `SystemConfig` key-value table, which is the obvious
+   home for a configurable prefix.
 
 9. **Status and priority enums are hardcoded in three places** —
    `src/format.rs`, `src/tui.rs` (`short_status`, `short_priority`,
@@ -128,8 +160,9 @@ These matter more than usual because the repo is public.
 
 ### Build, CI, supply chain
 
-18. **Zero tests.** `cargo test` runs 0 tests; there is no `tests/` directory
-    and no `#[cfg(test)]` anywhere. `relative_time`, `strip_html`,
+18. **Near-zero tests.** Before this branch `cargo test` ran 0 tests. It now
+    runs 3, all covering the query-param bug above. `relative_time`,
+    `strip_html`,
     `resolve_ticket`'s number parsing, and `resolve_helpdesk`'s URL
     normalization are all pure functions sitting right there, and the client
     is a prime candidate for `wiremock`.
