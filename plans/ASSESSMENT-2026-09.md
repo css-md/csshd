@@ -190,6 +190,19 @@ These matter more than usual because the repo is public.
     `cross` image. Worth revisiting — ARM Linux is a plausible target for a
     self-hosted crowd.
 
+## Status of this list
+
+Fixed on `claude/sleepy-cray-9mjfxi`: the `assignedTo` bug, TUI items 1 and 2,
+the `strip_html` block-structure bug and its duplicate (4), the doc lies
+(13-16), CI teeth (19), the installer's fail-open checksum (20), the missing
+dependency audit (21) — which turned up three live advisories, two of them
+directly relevant — plus fmt/clippy to zero and 14 tests where there were none.
+
+Still open: the CLI-side generalization items (8-12), `--json` error envelopes
+(6), token-expiry messaging (7), the `list` comment/code mismatch (5), the
+`auth_poll` 400 mapping (3), `completions` (17), the inert cargo-dist metadata
+(22), and aarch64-linux releases (23).
+
 ## Suggested order of work
 
 1. Confirm Phase 0 shipped; run `login`/`list`/`view` against the live
