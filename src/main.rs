@@ -66,13 +66,9 @@ enum Command {
         ticket: String,
     },
     /// Claim a ticket (assign to yourself, set status to IN_PROGRESS).
-    Claim {
-        ticket: String,
-    },
+    Claim { ticket: String },
     /// Close a ticket.
-    Close {
-        ticket: String,
-    },
+    Close { ticket: String },
     /// Add a comment to a ticket.
     Comment {
         ticket: String,
@@ -93,13 +89,15 @@ async fn main() -> Result<()> {
     if let Err(e) = dispatch(cli).await {
         eprintln!(
             "{} {e}",
-            "error:"
-                .if_supports_color(Stderr, |s| s.bold().red().to_string())
+            "error:".if_supports_color(Stderr, |s| s.bold().red().to_string())
         );
         // Print the chain in dimmed text so users see *why*.
         let mut src = e.source();
         while let Some(s) = src {
-            eprintln!("  {} {s}", "↳".if_supports_color(Stderr, |s| s.dimmed().to_string()));
+            eprintln!(
+                "  {} {s}",
+                "↳".if_supports_color(Stderr, |s| s.dimmed().to_string())
+            );
             src = s.source();
         }
         std::process::exit(1);

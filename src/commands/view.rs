@@ -8,26 +8,29 @@ pub async fn run(client: &Client, ticket: &str, json: bool) -> Result<()> {
     let t = client.get_ticket(&id).await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "id": t.id,
-            "ticketNumber": t.ticket_number,
-            "title": t.title,
-            "description": t.description,
-            "status": t.status,
-            "priority": t.priority,
-            "createdAt": t.created_at,
-            "updatedAt": t.updated_at,
-            "requester": serde_json::json!({"name": t.requester.name, "email": t.requester.email}),
-            "assignee": t.assigned_agent.as_ref().and_then(|a| a.name.clone()),
-            "site": t.site.as_ref().map(|s| s.name.clone()),
-            "comments": t.comments.iter().map(|c| serde_json::json!({
-                "id": c.id,
-                "body": c.body,
-                "isInternal": c.is_internal,
-                "createdAt": c.created_at,
-                "author": c.author.name,
-            })).collect::<Vec<_>>(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": t.id,
+                "ticketNumber": t.ticket_number,
+                "title": t.title,
+                "description": t.description,
+                "status": t.status,
+                "priority": t.priority,
+                "createdAt": t.created_at,
+                "updatedAt": t.updated_at,
+                "requester": serde_json::json!({"name": t.requester.name, "email": t.requester.email}),
+                "assignee": t.assigned_agent.as_ref().and_then(|a| a.name.clone()),
+                "site": t.site.as_ref().map(|s| s.name.clone()),
+                "comments": t.comments.iter().map(|c| serde_json::json!({
+                    "id": c.id,
+                    "body": c.body,
+                    "isInternal": c.is_internal,
+                    "createdAt": c.created_at,
+                    "author": c.author.name,
+                })).collect::<Vec<_>>(),
+            }))?
+        );
         return Ok(());
     }
 
@@ -43,9 +46,10 @@ pub async fn run(client: &Client, ticket: &str, json: bool) -> Result<()> {
         "  {} · {} · opened by {} · {}",
         format::status_styled(&t.status),
         format::priority_styled(&t.priority),
-        t.requester.name.as_deref().unwrap_or(
-            t.requester.email.as_deref().unwrap_or("?"),
-        ),
+        t.requester
+            .name
+            .as_deref()
+            .unwrap_or(t.requester.email.as_deref().unwrap_or("?"),),
         format::relative_time(t.created_at),
     );
     if let Some(agent) = &t.assigned_agent {
@@ -84,8 +88,16 @@ pub async fn run(client: &Client, ticket: &str, json: bool) -> Result<()> {
         println!(
             "  {} {}",
             "─".repeat(8),
-            format!("{} {}", t.comments.len(), if t.comments.len() == 1 { "reply" } else { "replies" })
-                .if_supports_color(Stdout, |s| s.dimmed().to_string()),
+            format!(
+                "{} {}",
+                t.comments.len(),
+                if t.comments.len() == 1 {
+                    "reply"
+                } else {
+                    "replies"
+                }
+            )
+            .if_supports_color(Stdout, |s| s.dimmed().to_string()),
         );
         println!();
         for c in &t.comments {

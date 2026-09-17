@@ -47,7 +47,10 @@ impl Client {
         if let Some(b) = body {
             rb = rb.json(b);
         }
-        let res = rb.send().await.with_context(|| format!("{method} {path}"))?;
+        let res = rb
+            .send()
+            .await
+            .with_context(|| format!("{method} {path}"))?;
         let status = res.status();
         if status == StatusCode::UNAUTHORIZED {
             bail!("Unauthorized — run `csshd login` to refresh credentials.");
@@ -116,7 +119,8 @@ impl Client {
     }
 
     pub async fn whoami(&self) -> Result<WhoAmI> {
-        self.req::<(), _>(Method::GET, "/api/v1/cli/whoami", None).await
+        self.req::<(), _>(Method::GET, "/api/v1/cli/whoami", None)
+            .await
     }
 
     // ── tickets ─────────────────────────────────────────────────────────
@@ -156,7 +160,10 @@ impl Client {
             let body = res.text().await.unwrap_or_default();
             bail!("GET /api/v1/tickets ({status}): {body}");
         }
-        Ok(res.json::<TicketsPage>().await.context("decoding tickets")?)
+        Ok(res
+            .json::<TicketsPage>()
+            .await
+            .context("decoding tickets")?)
     }
 
     pub async fn get_ticket(&self, id_or_number: &str) -> Result<Ticket> {
@@ -176,8 +183,12 @@ impl Client {
         id: &str,
         patch: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        self.req::<_, _>(Method::PATCH, &format!("/api/v1/tickets/{id}"), Some(&patch))
-            .await
+        self.req::<_, _>(
+            Method::PATCH,
+            &format!("/api/v1/tickets/{id}"),
+            Some(&patch),
+        )
+        .await
     }
 
     pub async fn comment(

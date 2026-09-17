@@ -51,7 +51,11 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode().context("disable_raw_mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -221,7 +225,11 @@ fn spawn_refresh(app: &App) {
     let tx = app.tx.clone();
     let q = TicketQuery {
         status: app.status_filter.clone(),
-        search: if app.search.is_empty() { None } else { Some(app.search.clone()) },
+        search: if app.search.is_empty() {
+            None
+        } else {
+            Some(app.search.clone())
+        },
         page: Some(1),
         page_size: Some(100),
         ..Default::default()
@@ -288,8 +296,13 @@ fn handle(app: &mut App, ev: AppEvent) {
             app.tickets = ts;
             // Keep the cursor stable but in-range.
             let new_len = app.tickets.len();
-            let cur = app.list_state.selected().unwrap_or(0).min(new_len.saturating_sub(1));
-            app.list_state.select(if new_len == 0 { None } else { Some(cur) });
+            let cur = app
+                .list_state
+                .selected()
+                .unwrap_or(0)
+                .min(new_len.saturating_sub(1));
+            app.list_state
+                .select(if new_len == 0 { None } else { Some(cur) });
         }
         AppEvent::TicketLoaded(t) => {
             app.detail = Some(*t);
@@ -310,7 +323,10 @@ fn handle_key(app: &mut App, k: KeyEvent) {
     match app.pane {
         Pane::Search => handle_key_search(app, k),
         Pane::Help => {
-            if matches!(k.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')) {
+            if matches!(
+                k.code,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+            ) {
                 app.pane = Pane::List;
             }
         }
@@ -346,7 +362,10 @@ fn handle_key_list(app: &mut App, k: KeyEvent) {
         }
         KeyCode::Char('r') => {
             if let Some(t) = app.selected_ticket() {
-                app.flash(format!("Reply on {} — open detail (Enter) first.", t.ticket_number));
+                app.flash(format!(
+                    "Reply on {} — open detail (Enter) first.",
+                    t.ticket_number
+                ));
             }
         }
         KeyCode::Char('c') => {
@@ -410,7 +429,9 @@ fn handle_key_detail(app: &mut App, k: KeyEvent) {
             app.pane = Pane::List;
             app.detail = None;
         }
-        KeyCode::Char('j') | KeyCode::Down => app.detail_scroll = app.detail_scroll.saturating_add(1),
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.detail_scroll = app.detail_scroll.saturating_add(1)
+        }
         KeyCode::Char('k') | KeyCode::Up => app.detail_scroll = app.detail_scroll.saturating_sub(1),
         KeyCode::PageDown => app.detail_scroll = app.detail_scroll.saturating_add(10),
         KeyCode::PageUp => app.detail_scroll = app.detail_scroll.saturating_sub(10),
@@ -478,7 +499,8 @@ fn handle_key_detail(app: &mut App, k: KeyEvent) {
                 tokio::spawn(async move {
                     match crate::commands::comment::run(&client, &id, None, false).await {
                         Ok(()) => {
-                            let _ = tx.send(AppEvent::Status(format!("Comment posted on {number}.")));
+                            let _ =
+                                tx.send(AppEvent::Status(format!("Comment posted on {number}.")));
                         }
                         Err(e) => {
                             let _ = tx.send(AppEvent::Error(format!("comment failed: {e}")));
@@ -591,8 +613,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),     // body
-            Constraint::Length(1),  // status / help line
+            Constraint::Min(0),    // body
+            Constraint::Length(1), // status / help line
         ])
         .split(f.area());
 
@@ -640,7 +662,10 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
                 _ => Style::default().fg(Color::DarkGray),
             };
             let line = Line::from(vec![
-                Span::styled(format!("{:<10} ", t.ticket_number), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:<10} ", t.ticket_number),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(short_status(&t.status), status_style),
                 Span::raw(" "),
                 Span::styled(short_priority(&t.priority), priority_style),
@@ -653,7 +678,12 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, area, &mut app.list_state);
@@ -713,20 +743,31 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
                 ])
             })
             .unwrap_or_else(|| Paragraph::new("No tickets."));
-        f.render_widget(preview.block(Block::default().borders(Borders::ALL).title("Detail")).wrap(Wrap { trim: false }), area);
+        f.render_widget(
+            preview
+                .block(Block::default().borders(Borders::ALL).title("Detail"))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
         return;
     }
 
     let Some(t) = app.detail.as_ref() else {
-        let p = Paragraph::new(Span::styled("Loading…", Style::default().fg(Color::DarkGray)))
-            .block(Block::default().borders(Borders::ALL).title("Detail"));
+        let p = Paragraph::new(Span::styled(
+            "Loading…",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(Block::default().borders(Borders::ALL).title("Detail"));
         f.render_widget(p, area);
         return;
     };
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled(t.ticket_number.clone(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                t.ticket_number.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::raw(t.title.clone()),
         ]),
@@ -754,7 +795,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         format!(
             "── {} {} ──",
             t.comments.len(),
-            if t.comments.len() == 1 { "reply" } else { "replies" }
+            if t.comments.len() == 1 {
+                "reply"
+            } else {
+                "replies"
+            }
         ),
         Style::default().fg(Color::DarkGray),
     )));
@@ -763,9 +808,15 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
     for c in &t.comments {
         let internal = if c.is_internal { " [internal]" } else { "" };
         lines.push(Line::from(vec![
-            Span::styled(party_label(&c.author), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                party_label(&c.author),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::styled(internal.to_string(), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("  {}", c.created_at.format("%Y-%m-%d %H:%M")), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("  {}", c.created_at.format("%Y-%m-%d %H:%M")),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
         for line in strip_html(&c.body).lines() {
             lines.push(Line::raw(format!("  {line}")));
@@ -774,7 +825,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(format!("Detail — {}", t.ticket_number)))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Detail — {}", t.ticket_number)),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0));
     f.render_widget(p, area);
@@ -783,7 +838,9 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
 fn status_color(s: &str) -> Style {
     match s {
         "OPEN" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "IN_PROGRESS" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        "IN_PROGRESS" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
         "PENDING" => Style::default().fg(Color::Cyan),
         "RESOLVED" => Style::default().fg(Color::Green),
         _ => Style::default().fg(Color::DarkGray),
@@ -792,7 +849,10 @@ fn status_color(s: &str) -> Style {
 
 fn priority_color(p: &str) -> Style {
     match p {
-        "CRITICAL" => Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD),
+        "CRITICAL" => Style::default()
+            .fg(Color::White)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD),
         "HIGH" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         "LOW" => Style::default().fg(Color::DarkGray),
         _ => Style::default(),
@@ -818,7 +878,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
 fn draw_help_overlay(f: &mut Frame, _app: &App) {
     let area = centered_rect(60, 60, f.area());
     let lines = vec![
-        Line::from(Span::styled("csshd — keymap", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "csshd — keymap",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::raw(""),
         Line::raw("  List view"),
         Line::raw("    j / ↓     Move selection down"),

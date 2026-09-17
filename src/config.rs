@@ -36,10 +36,10 @@ pub fn load() -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let cfg: Config = toml::from_str(&contents)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
     Ok(cfg)
 }
 
@@ -60,13 +60,11 @@ pub fn resolve_helpdesk(cli: Option<String>, cfg: &Config) -> Result<String> {
         .or_else(|| std::env::var("CSSHD_HELPDESK").ok())
         .or_else(|| cfg.helpdesk.clone())
         .ok_or_else(|| {
-            anyhow!(
-                "No helpdesk URL configured. Run `csshd login --helpdesk <url>` to set one."
-            )
+            anyhow!("No helpdesk URL configured. Run `csshd login --helpdesk <url>` to set one.")
         })?;
     let trimmed = raw.trim().trim_end_matches('/').to_string();
     // Validate URL parse-ability.
-    let _ = url::Url::parse(&trimmed)
-        .with_context(|| format!("invalid helpdesk URL: {trimmed}"))?;
+    let _ =
+        url::Url::parse(&trimmed).with_context(|| format!("invalid helpdesk URL: {trimmed}"))?;
     Ok(trimmed)
 }

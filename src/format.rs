@@ -26,13 +26,20 @@ pub fn relative_time(t: DateTime<Utc>) -> String {
 
 pub fn status_styled(status: &str) -> String {
     match status {
-        "OPEN" => status.bold().red().if_supports_color(Stdout, |s| s.to_string()).to_string(),
+        "OPEN" => status
+            .bold()
+            .red()
+            .if_supports_color(Stdout, |s| s.to_string())
+            .to_string(),
         "IN_PROGRESS" => "IN PROGRESS"
             .bold()
             .yellow()
             .if_supports_color(Stdout, |s| s.to_string())
             .to_string(),
-        "PENDING" => status.cyan().if_supports_color(Stdout, |s| s.to_string()).to_string(),
+        "PENDING" => status
+            .cyan()
+            .if_supports_color(Stdout, |s| s.to_string())
+            .to_string(),
         "RESOLVED" => status
             .green()
             .if_supports_color(Stdout, |s| s.to_string())
