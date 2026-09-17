@@ -141,10 +141,7 @@ impl Client {
             let body = res.text().await.unwrap_or_default();
             bail!("GET /api/v1/tickets ({status}): {body}");
         }
-        Ok(res
-            .json::<TicketsPage>()
-            .await
-            .context("decoding tickets")?)
+        res.json::<TicketsPage>().await.context("decoding tickets")
     }
 
     pub async fn get_ticket(&self, id_or_number: &str) -> Result<Ticket> {
@@ -255,6 +252,10 @@ fn ticket_query_params(q: &TicketQuery) -> Vec<(&'static str, String)> {
 
 // ── DTOs ────────────────────────────────────────────────────────────────
 
+/// Some fields here mirror the helpdesk's response for documentation and
+/// forward-compatibility even where the CLI doesn't read them yet — e.g. we
+/// use `verification_uri_complete` and ignore the bare `verification_uri`.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeviceCodeResponse {
     #[serde(rename = "deviceCode")]
@@ -316,6 +317,7 @@ pub struct TicketsPage {
     pub page_size: Option<u32>,
 }
 
+#[allow(dead_code)] // `source` is part of the API shape; not rendered yet.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TicketSummary {
@@ -332,6 +334,7 @@ pub struct TicketSummary {
     pub site: Option<NamedRef>,
 }
 
+#[allow(dead_code)] // `id` is carried for callers that need to patch by id.
 #[derive(Debug, Deserialize)]
 pub struct PartyRef {
     pub id: Option<String>,

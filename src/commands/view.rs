@@ -69,11 +69,7 @@ pub async fn run(client: &Client, ticket: &str, json: bool) -> Result<()> {
 
     // Description — strip the HTML marker, render as plaintext (markdown-ish
     // viewer is Phase 2's TUI job).
-    let body = t
-        .description
-        .strip_prefix("<!--html-->")
-        .map(|s| strip_html(s))
-        .unwrap_or_else(|| t.description.clone());
+    let body = format::html_to_text(&t.description);
     let trimmed = body.trim();
     if !trimmed.is_empty() {
         for line in trimmed.lines() {
@@ -115,11 +111,7 @@ pub async fn run(client: &Client, ticket: &str, json: bool) -> Result<()> {
                 when.if_supports_color(Stdout, |s| s.dimmed().to_string()),
                 internal.if_supports_color(Stdout, |s| s.yellow().to_string()),
             );
-            let cb = c
-                .body
-                .strip_prefix("<!--html-->")
-                .map(|s| strip_html(s))
-                .unwrap_or_else(|| c.body.clone());
+            let cb = format::html_to_text(&c.body);
             for line in cb.trim().lines() {
                 println!("    {line}");
             }
@@ -128,26 +120,4 @@ pub async fn run(client: &Client, ticket: &str, json: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Bare-bones HTML→text. Good enough for replies in a CLI; not bulletproof.
-/// Phase 2 TUI can use a real renderer (pulldown-cmark or similar) for
-/// markdown-ish output.
-fn strip_html(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            c if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
 }
