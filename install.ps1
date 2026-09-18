@@ -41,16 +41,30 @@ try {
   Write-Host "csshd: downloading $url"
   Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp $archive) -UseBasicParsing
 
+  # Fail closed: a release without a readable checksum is not installed. Set
+  # CSSHD_SKIP_CHECKSUM=1 only if you have verified the download another way.
+  # (Caught broadly on purpose — Windows PowerShell throws WebException here
+  # while PowerShell 7 throws HttpRequestException.)
+  $shaOk = $true
   try {
     Invoke-WebRequest -Uri $shaUrl -OutFile (Join-Path $tmp "$archive.sha256") -UseBasicParsing
+  } catch {
+    $shaOk = $false
+  }
+
+  if (-not $shaOk) {
+    if ($env:CSSHD_SKIP_CHECKSUM -eq '1') {
+      Write-Host 'csshd: checksum unavailable, continuing (CSSHD_SKIP_CHECKSUM=1)' -ForegroundColor Yellow
+    } else {
+      throw "csshd: could not fetch $shaUrl - refusing to install unverified. Set CSSHD_SKIP_CHECKSUM=1 to override."
+    }
+  } else {
     Write-Host 'csshd: verifying checksum'
     $expected = (Get-Content (Join-Path $tmp "$archive.sha256")).Split(' ')[0]
     $actual   = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $archive)).Hash.ToLower()
     if ($expected -ne $actual) {
       throw "csshd: checksum mismatch (expected $expected, got $actual)"
     }
-  } catch [System.Net.WebException] {
-    Write-Host 'csshd: checksum file unavailable, skipping verification' -ForegroundColor Yellow
   }
 
   Expand-Archive -Path (Join-Path $tmp $archive) -DestinationPath $tmp -Force

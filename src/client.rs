@@ -47,7 +47,10 @@ impl Client {
         if let Some(b) = body {
             rb = rb.json(b);
         }
-        let res = rb.send().await.with_context(|| format!("{method} {path}"))?;
+        let res = rb
+            .send()
+            .await
+            .with_context(|| format!("{method} {path}"))?;
         let status = res.status();
         if status == StatusCode::UNAUTHORIZED {
             bail!("Unauthorized — run `csshd login` to refresh credentials.");
@@ -116,32 +119,14 @@ impl Client {
     }
 
     pub async fn whoami(&self) -> Result<WhoAmI> {
-        self.req::<(), _>(Method::GET, "/api/v1/cli/whoami", None).await
+        self.req::<(), _>(Method::GET, "/api/v1/cli/whoami", None)
+            .await
     }
 
     // ── tickets ─────────────────────────────────────────────────────────
 
     pub async fn list_tickets(&self, q: TicketQuery) -> Result<TicketsPage> {
-        // Build query as Vec<(&str, String)> and let reqwest handle encoding.
-        // Avoids url::form_urlencoded::Serializer, whose inner buffer holds a
-        // Cow<'_, [u8]> that's !Send — futures touching it can't cross thread
-        // boundaries (breaks tokio::spawn).
-        let mut params: Vec<(&str, String)> = Vec::with_capacity(5);
-        if let Some(s) = q.status {
-            params.push(("status", s));
-        }
-        if let Some(a) = q.assignee {
-            params.push(("assignee", a));
-        }
-        if let Some(s) = q.search {
-            params.push(("q", s));
-        }
-        if let Some(p) = q.page {
-            params.push(("page", p.to_string()));
-        }
-        if let Some(ps) = q.page_size {
-            params.push(("pageSize", ps.to_string()));
-        }
+        let params = ticket_query_params(&q);
 
         let mut rb = self.http.get(self.url("/api/v1/tickets")).query(&params);
         if let Some(t) = &self.token {
@@ -156,7 +141,7 @@ impl Client {
             let body = res.text().await.unwrap_or_default();
             bail!("GET /api/v1/tickets ({status}): {body}");
         }
-        Ok(res.json::<TicketsPage>().await.context("decoding tickets")?)
+        res.json::<TicketsPage>().await.context("decoding tickets")
     }
 
     pub async fn get_ticket(&self, id_or_number: &str) -> Result<Ticket> {
@@ -176,8 +161,12 @@ impl Client {
         id: &str,
         patch: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        self.req::<_, _>(Method::PATCH, &format!("/api/v1/tickets/{id}"), Some(&patch))
-            .await
+        self.req::<_, _>(
+            Method::PATCH,
+            &format!("/api/v1/tickets/{id}"),
+            Some(&patch),
+        )
+        .await
     }
 
     pub async fn comment(
@@ -229,8 +218,44 @@ impl Client {
     }
 }
 
+/// Build the querystring pairs for `GET /api/v1/tickets`.
+///
+/// Returned as `Vec<(&str, String)>` so reqwest handles the encoding. We avoid
+/// `url::form_urlencoded::Serializer` here: its inner buffer holds a
+/// `Cow<'_, [u8]>` that is `!Send`, so futures touching it can't cross thread
+/// boundaries (breaks `tokio::spawn`).
+///
+/// Parameter names must match the helpdesk's route handler exactly. It picks
+/// each one out of `searchParams` by name and ignores anything it doesn't
+/// recognize, so a typo here is an unfiltered result set, not an error.
+fn ticket_query_params(q: &TicketQuery) -> Vec<(&'static str, String)> {
+    let mut params: Vec<(&'static str, String)> = Vec::with_capacity(5);
+    if let Some(s) = &q.status {
+        params.push(("status", s.clone()));
+    }
+    if let Some(a) = &q.assignee {
+        // NOT "assignee" — the list route reads `assignedTo`. (Only
+        // /api/v1/tickets/export uses `assignee`.)
+        params.push(("assignedTo", a.clone()));
+    }
+    if let Some(s) = &q.search {
+        params.push(("q", s.clone()));
+    }
+    if let Some(p) = q.page {
+        params.push(("page", p.to_string()));
+    }
+    if let Some(ps) = q.page_size {
+        params.push(("pageSize", ps.to_string()));
+    }
+    params
+}
+
 // ── DTOs ────────────────────────────────────────────────────────────────
 
+/// Some fields here mirror the helpdesk's response for documentation and
+/// forward-compatibility even where the CLI doesn't read them yet — e.g. we
+/// use `verification_uri_complete` and ignore the bare `verification_uri`.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeviceCodeResponse {
     #[serde(rename = "deviceCode")]
@@ -292,6 +317,7 @@ pub struct TicketsPage {
     pub page_size: Option<u32>,
 }
 
+#[allow(dead_code)] // `source` is part of the API shape; not rendered yet.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TicketSummary {
@@ -308,6 +334,7 @@ pub struct TicketSummary {
     pub site: Option<NamedRef>,
 }
 
+#[allow(dead_code)] // `id` is carried for callers that need to patch by id.
 #[derive(Debug, Deserialize)]
 pub struct PartyRef {
     pub id: Option<String>,
@@ -341,4 +368,57 @@ pub struct Comment {
     pub is_internal: bool,
     pub created_at: DateTime<Utc>,
     pub author: PartyRef,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(params: &[(&'static str, String)]) -> Vec<&'static str> {
+        params.iter().map(|(k, _)| *k).collect()
+    }
+
+    fn value<'a>(params: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
+        params
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Regression: we used to send `assignee`, but the helpdesk's list route
+    /// reads `assignedTo` and silently ignores unknown params — so
+    /// `csshd list --mine` returned *every* ticket instead of just yours.
+    #[test]
+    fn assignee_is_sent_as_assigned_to() {
+        let params = ticket_query_params(&TicketQuery {
+            assignee: Some("me".into()),
+            ..Default::default()
+        });
+        assert_eq!(value(&params, "assignedTo"), Some("me"));
+        assert!(
+            !names(&params).contains(&"assignee"),
+            "`assignee` is only understood by /api/v1/tickets/export, not the list route"
+        );
+    }
+
+    #[test]
+    fn empty_query_sends_no_params() {
+        assert!(ticket_query_params(&TicketQuery::default()).is_empty());
+    }
+
+    #[test]
+    fn all_filters_map_to_their_wire_names() {
+        let params = ticket_query_params(&TicketQuery {
+            status: Some("OPEN".into()),
+            assignee: Some("usr_123".into()),
+            search: Some("printer jam".into()),
+            page: Some(2),
+            page_size: Some(50),
+        });
+        assert_eq!(value(&params, "status"), Some("OPEN"));
+        assert_eq!(value(&params, "assignedTo"), Some("usr_123"));
+        assert_eq!(value(&params, "q"), Some("printer jam"));
+        assert_eq!(value(&params, "page"), Some("2"));
+        assert_eq!(value(&params, "pageSize"), Some("50"));
+    }
 }

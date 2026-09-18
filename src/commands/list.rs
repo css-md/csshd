@@ -35,22 +35,25 @@ pub async fn run(client: &Client, opts: ListOpts) -> Result<()> {
     let page = client.list_tickets(q).await?;
 
     if opts.json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "total": page.total,
-            "page": page.page,
-            "pageSize": page.page_size,
-            "tickets": page.tickets.iter().map(|t| serde_json::json!({
-                "id": t.id,
-                "ticketNumber": t.ticket_number,
-                "title": t.title,
-                "status": t.status,
-                "priority": t.priority,
-                "assignee": t.assigned_agent.as_ref().and_then(|a| a.name.clone()),
-                "site": t.site.as_ref().map(|s| s.name.clone()),
-                "createdAt": t.created_at,
-                "updatedAt": t.updated_at,
-            })).collect::<Vec<_>>(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total": page.total,
+                "page": page.page,
+                "pageSize": page.page_size,
+                "tickets": page.tickets.iter().map(|t| serde_json::json!({
+                    "id": t.id,
+                    "ticketNumber": t.ticket_number,
+                    "title": t.title,
+                    "status": t.status,
+                    "priority": t.priority,
+                    "assignee": t.assigned_agent.as_ref().and_then(|a| a.name.clone()),
+                    "site": t.site.as_ref().map(|s| s.name.clone()),
+                    "createdAt": t.created_at,
+                    "updatedAt": t.updated_at,
+                })).collect::<Vec<_>>(),
+            }))?
+        );
         return Ok(());
     }
 

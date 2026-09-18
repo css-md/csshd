@@ -7,19 +7,17 @@ pub async fn run(helpdesk_arg: Option<String>) -> Result<()> {
     let mut cfg = config::load().unwrap_or_default();
     let helpdesk = match helpdesk_arg {
         Some(url) => url.trim().trim_end_matches('/').to_string(),
-        None => cfg
-            .helpdesk
-            .clone()
-            .ok_or_else(|| {
-                anyhow!(
-                    "First login — pass --helpdesk <url> (e.g. https://helpdesk.example.com).\n\
+        None => cfg.helpdesk.clone().ok_or_else(|| {
+            anyhow!(
+                "First login — pass --helpdesk <url> (e.g. https://helpdesk.example.com).\n\
                      Subsequent logins remember the URL."
-                )
-            })?,
+            )
+        })?,
     };
 
     // Validate URL parse-ability before contacting it.
     let _ = url::Url::parse(&helpdesk).with_context(|| format!("invalid URL: {helpdesk}"))?;
+    config::warn_if_insecure(&helpdesk);
 
     let client = Client::new(&helpdesk, None)?;
     let token = auth::login(&client).await?;

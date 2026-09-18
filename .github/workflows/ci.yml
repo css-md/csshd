@@ -9,7 +9,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # keyring's Linux backend talks to the Secret Service via dbus.
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -17,16 +17,15 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
-      # fmt + clippy are advisory for v0.1 — tighten with -- -D warnings later.
+      # Both are clean as of the Sept 2026 cleanup, so they gate now. If this
+      # starts failing, fix the code — don't re-add continue-on-error.
       - run: cargo fmt --check
-        continue-on-error: true
-      - run: cargo clippy --all-targets
-        continue-on-error: true
+      - run: cargo clippy --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

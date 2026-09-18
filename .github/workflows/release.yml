@@ -32,7 +32,7 @@ jobs:
             os: windows-latest
             archive: zip
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Linux deps (keyring → libdbus)
         if: runner.os == 'Linux'
@@ -84,7 +84,7 @@ jobs:
             sha256sum "$ARTIFACT" > "${ARTIFACT}.sha256"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -96,9 +96,9 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -113,7 +113,7 @@ jobs:
           sed "s|__TAG__|${tag}|g" install.ps1 > out/csshd-installer.ps1
           chmod +x out/csshd-installer.sh
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             out/*

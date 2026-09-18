@@ -9,6 +9,7 @@
 //! AppEvent variants over an mpsc channel.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::client::{Client, PartyRef, Ticket, TicketQuery, TicketSummary};
+use crate::format::html_to_text;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -51,7 +53,11 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode().context("disable_raw_mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -96,6 +102,13 @@ struct App {
     detail_area: Option<Rect>,
     /// First-visible-ticket-index in the list pane (set during draw()).
     list_offset: usize,
+    /// Set while the terminal is handed over to $EDITOR. The input reader
+    /// checks this and stops consuming stdin so the editor gets it instead.
+    input_paused: Arc<AtomicBool>,
+    /// Ticket (id, number) whose reply editor should be opened by the event
+    /// loop. Handled there rather than in `handle()` because it needs
+    /// exclusive control of the terminal, which only `run_app` holds.
+    pending_reply: Option<(String, String)>,
 }
 
 impl App {
@@ -116,6 +129,8 @@ impl App {
             list_area: None,
             detail_area: None,
             list_offset: 0,
+            input_paused: Arc::new(AtomicBool::new(false)),
+            pending_reply: None,
         };
         s.list_state.select(Some(0));
         s
@@ -159,7 +174,7 @@ async fn run_app(
     // Initial load + periodic refresh.
     spawn_refresh(&app);
     spawn_ticker(tx.clone());
-    spawn_keys(tx.clone());
+    spawn_keys(tx.clone(), app.input_paused.clone());
 
     while !app.quit {
         terminal.draw(|f| draw(f, &mut app))?;
@@ -167,8 +182,58 @@ async fn run_app(
         // We block here; tokio's mpsc + spawned tasks make this a real event loop.
         let Some(ev) = rx.recv().await else { break };
         handle(&mut app, ev);
+
+        if let Some((id, number)) = app.pending_reply.take() {
+            reply_in_editor(terminal, &mut app, &mut rx, &id, &number).await?;
+        }
     }
 
+    Ok(())
+}
+
+/// Hand the terminal over to `$EDITOR` for a reply, then take it back.
+///
+/// The editor needs a normal cooked-mode terminal on the main screen, and it
+/// needs stdin to itself. So we pause the input reader, leave raw mode and the
+/// alternate screen, run the comment flow to completion, then restore
+/// everything and drop any input that arrived in between.
+async fn reply_in_editor(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+    id: &str,
+    number: &str,
+) -> Result<()> {
+    app.input_paused.store(true, Ordering::SeqCst);
+    // The reader may already be inside a 200ms poll; give it time to come back
+    // round and notice the flag before we touch the terminal mode.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    restore_terminal(terminal)?;
+    let result = crate::commands::comment::run(&app.client, id, None, false).await;
+    *terminal = setup_terminal()?;
+    terminal.clear()?;
+
+    // Anything the reader managed to grab before pausing, plus whatever the
+    // editor left behind, would otherwise be replayed at the list — a stray
+    // 'q' would quit. Drop input events; keep nothing.
+    app.input_paused.store(false, Ordering::SeqCst);
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEvent::Error(e) = ev {
+            app.flash(format!("error: {e}"));
+        }
+    }
+
+    match result {
+        Ok(()) => {
+            app.flash(format!("Comment posted on {number}."));
+            // Pull the new comment into the open detail view.
+            let detail_id = id.to_string();
+            spawn_load_detail(app, detail_id);
+            app.last_refresh = None;
+        }
+        Err(e) => app.flash(format!("error: comment failed: {e}")),
+    }
     Ok(())
 }
 
@@ -186,8 +251,17 @@ fn spawn_ticker(tx: mpsc::UnboundedSender<AppEvent>) {
     });
 }
 
-fn spawn_keys(tx: mpsc::UnboundedSender<AppEvent>) {
+fn spawn_keys(tx: mpsc::UnboundedSender<AppEvent>, paused: Arc<AtomicBool>) {
     tokio::task::spawn_blocking(move || loop {
+        // While $EDITOR has the terminal, stay off stdin entirely — reading it
+        // here would steal the user's keystrokes out from under the editor.
+        if paused.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(50));
+            if tx.is_closed() {
+                break;
+            }
+            continue;
+        }
         // Block for up to 200ms waiting for input. Timeout returns Ok(false)
         // and we loop again — this lets us exit promptly when the channel closes.
         match event::poll(Duration::from_millis(200)) {
@@ -221,7 +295,11 @@ fn spawn_refresh(app: &App) {
     let tx = app.tx.clone();
     let q = TicketQuery {
         status: app.status_filter.clone(),
-        search: if app.search.is_empty() { None } else { Some(app.search.clone()) },
+        search: if app.search.is_empty() {
+            None
+        } else {
+            Some(app.search.clone())
+        },
         page: Some(1),
         page_size: Some(100),
         ..Default::default()
@@ -288,14 +366,24 @@ fn handle(app: &mut App, ev: AppEvent) {
             app.tickets = ts;
             // Keep the cursor stable but in-range.
             let new_len = app.tickets.len();
-            let cur = app.list_state.selected().unwrap_or(0).min(new_len.saturating_sub(1));
-            app.list_state.select(if new_len == 0 { None } else { Some(cur) });
+            let cur = app
+                .list_state
+                .selected()
+                .unwrap_or(0)
+                .min(new_len.saturating_sub(1));
+            app.list_state
+                .select(if new_len == 0 { None } else { Some(cur) });
         }
         AppEvent::TicketLoaded(t) => {
             app.detail = Some(*t);
             app.detail_scroll = 0;
         }
-        AppEvent::Status(s) => app.flash(s),
+        AppEvent::Status(s) => {
+            // Status is only sent after a mutation succeeded, so the list on
+            // screen is now stale — make the next tick refetch.
+            app.flash(s);
+            app.last_refresh = None;
+        }
         AppEvent::Error(s) => app.flash(format!("error: {s}")),
     }
 }
@@ -310,7 +398,10 @@ fn handle_key(app: &mut App, k: KeyEvent) {
     match app.pane {
         Pane::Search => handle_key_search(app, k),
         Pane::Help => {
-            if matches!(k.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')) {
+            if matches!(
+                k.code,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+            ) {
                 app.pane = Pane::List;
             }
         }
@@ -346,7 +437,10 @@ fn handle_key_list(app: &mut App, k: KeyEvent) {
         }
         KeyCode::Char('r') => {
             if let Some(t) = app.selected_ticket() {
-                app.flash(format!("Reply on {} — open detail (Enter) first.", t.ticket_number));
+                app.flash(format!(
+                    "Reply on {} — open detail (Enter) first.",
+                    t.ticket_number
+                ));
             }
         }
         KeyCode::Char('c') => {
@@ -410,7 +504,9 @@ fn handle_key_detail(app: &mut App, k: KeyEvent) {
             app.pane = Pane::List;
             app.detail = None;
         }
-        KeyCode::Char('j') | KeyCode::Down => app.detail_scroll = app.detail_scroll.saturating_add(1),
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.detail_scroll = app.detail_scroll.saturating_add(1)
+        }
         KeyCode::Char('k') | KeyCode::Up => app.detail_scroll = app.detail_scroll.saturating_sub(1),
         KeyCode::PageDown => app.detail_scroll = app.detail_scroll.saturating_add(10),
         KeyCode::PageUp => app.detail_scroll = app.detail_scroll.saturating_sub(10),
@@ -441,7 +537,6 @@ fn handle_key_detail(app: &mut App, k: KeyEvent) {
                     {
                         Ok(_) => {
                             let _ = tx.send(AppEvent::Status(format!("Claimed {number}.")));
-                            let _ = tx.send(AppEvent::Tick); // trigger refresh next tick
                         }
                         Err(e) => {
                             let _ = tx.send(AppEvent::Error(format!("claim failed: {e}")));
@@ -466,25 +561,11 @@ fn handle_key_detail(app: &mut App, k: KeyEvent) {
             }
         }
         KeyCode::Char('r') => {
-            // Drop out of the alt-screen, run $EDITOR for the comment, restore.
-            // Quick-and-dirty: we have to take the terminal back to cooked mode
-            // first or vim will misbehave. Done in an async block so the event
-            // loop's redraw doesn't fight us.
+            // Running the editor needs exclusive use of the terminal, which
+            // only run_app holds — hand it the request and let the event loop
+            // do the suspend/restore dance.
             if let Some(t) = app.detail.as_ref() {
-                let id = t.id.clone();
-                let number = t.ticket_number.clone();
-                let client = app.client.clone();
-                let tx = app.tx.clone();
-                tokio::spawn(async move {
-                    match crate::commands::comment::run(&client, &id, None, false).await {
-                        Ok(()) => {
-                            let _ = tx.send(AppEvent::Status(format!("Comment posted on {number}.")));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AppEvent::Error(format!("comment failed: {e}")));
-                        }
-                    }
-                });
+                app.pending_reply = Some((t.id.clone(), t.ticket_number.clone()));
             }
         }
         _ => {}
@@ -591,8 +672,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),     // body
-            Constraint::Length(1),  // status / help line
+            Constraint::Min(0),    // body
+            Constraint::Length(1), // status / help line
         ])
         .split(f.area());
 
@@ -640,7 +721,10 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
                 _ => Style::default().fg(Color::DarkGray),
             };
             let line = Line::from(vec![
-                Span::styled(format!("{:<10} ", t.ticket_number), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:<10} ", t.ticket_number),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(short_status(&t.status), status_style),
                 Span::raw(" "),
                 Span::styled(short_priority(&t.priority), priority_style),
@@ -653,7 +737,12 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, area, &mut app.list_state);
@@ -713,20 +802,31 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
                 ])
             })
             .unwrap_or_else(|| Paragraph::new("No tickets."));
-        f.render_widget(preview.block(Block::default().borders(Borders::ALL).title("Detail")).wrap(Wrap { trim: false }), area);
+        f.render_widget(
+            preview
+                .block(Block::default().borders(Borders::ALL).title("Detail"))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
         return;
     }
 
     let Some(t) = app.detail.as_ref() else {
-        let p = Paragraph::new(Span::styled("Loading…", Style::default().fg(Color::DarkGray)))
-            .block(Block::default().borders(Borders::ALL).title("Detail"));
+        let p = Paragraph::new(Span::styled(
+            "Loading…",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(Block::default().borders(Borders::ALL).title("Detail"));
         f.render_widget(p, area);
         return;
     };
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled(t.ticket_number.clone(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                t.ticket_number.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::raw(t.title.clone()),
         ]),
@@ -745,7 +845,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
     }
     lines.push(Line::raw(""));
 
-    let body = strip_html(&t.description);
+    let body = html_to_text(&t.description);
     for l in body.lines() {
         lines.push(Line::raw(l.to_string()));
     }
@@ -754,7 +854,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         format!(
             "── {} {} ──",
             t.comments.len(),
-            if t.comments.len() == 1 { "reply" } else { "replies" }
+            if t.comments.len() == 1 {
+                "reply"
+            } else {
+                "replies"
+            }
         ),
         Style::default().fg(Color::DarkGray),
     )));
@@ -763,18 +867,28 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
     for c in &t.comments {
         let internal = if c.is_internal { " [internal]" } else { "" };
         lines.push(Line::from(vec![
-            Span::styled(party_label(&c.author), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                party_label(&c.author),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::styled(internal.to_string(), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("  {}", c.created_at.format("%Y-%m-%d %H:%M")), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("  {}", c.created_at.format("%Y-%m-%d %H:%M")),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
-        for line in strip_html(&c.body).lines() {
+        for line in html_to_text(&c.body).lines() {
             lines.push(Line::raw(format!("  {line}")));
         }
         lines.push(Line::raw(""));
     }
 
     let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(format!("Detail — {}", t.ticket_number)))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Detail — {}", t.ticket_number)),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0));
     f.render_widget(p, area);
@@ -783,7 +897,9 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
 fn status_color(s: &str) -> Style {
     match s {
         "OPEN" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "IN_PROGRESS" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        "IN_PROGRESS" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
         "PENDING" => Style::default().fg(Color::Cyan),
         "RESOLVED" => Style::default().fg(Color::Green),
         _ => Style::default().fg(Color::DarkGray),
@@ -792,7 +908,10 @@ fn status_color(s: &str) -> Style {
 
 fn priority_color(p: &str) -> Style {
     match p {
-        "CRITICAL" => Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD),
+        "CRITICAL" => Style::default()
+            .fg(Color::White)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD),
         "HIGH" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         "LOW" => Style::default().fg(Color::DarkGray),
         _ => Style::default(),
@@ -818,7 +937,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
 fn draw_help_overlay(f: &mut Frame, _app: &App) {
     let area = centered_rect(60, 60, f.area());
     let lines = vec![
-        Line::from(Span::styled("csshd — keymap", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "csshd — keymap",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::raw(""),
         Line::raw("  List view"),
         Line::raw("    j / ↓     Move selection down"),
@@ -865,26 +987,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-// Bare-bones HTML→text. Keep behaviour identical to commands::view::strip_html
-// so the same output format is used in both modes.
-fn strip_html(input: &str) -> String {
-    let body = input.strip_prefix("<!--html-->").unwrap_or(input);
-    let mut out = String::with_capacity(body.len());
-    let mut in_tag = false;
-    for ch in body.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            c if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
 }

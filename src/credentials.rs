@@ -16,8 +16,7 @@ use keyring::Entry;
 const SERVICE: &str = "csshd";
 
 fn entry(helpdesk: &str) -> Result<Entry> {
-    Entry::new(SERVICE, helpdesk)
-        .with_context(|| format!("keyring open ({SERVICE} / {helpdesk})"))
+    Entry::new(SERVICE, helpdesk).with_context(|| format!("keyring open ({SERVICE} / {helpdesk})"))
 }
 
 pub fn store_token(helpdesk: &str, token: &str) -> Result<()> {

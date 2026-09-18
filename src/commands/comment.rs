@@ -85,8 +85,8 @@ fn open_editor(is_internal: bool) -> Result<String> {
         bail!("editor exited non-zero");
     }
 
-    let raw = std::fs::read_to_string(&file)
-        .with_context(|| format!("reading {}", file.display()))?;
+    let raw =
+        std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
     // Best-effort cleanup
     let _ = std::fs::remove_file(&file);
 
