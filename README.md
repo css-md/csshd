@@ -3,12 +3,16 @@
 Terminal client for the CSS IT Helpdesk. Triage, claim, comment on, and close tickets from your shell — and run a real TUI when you want to live in it.
 
 > **Status:** Phases 1 and 2 are implemented and the helpdesk side (device-code
-> auth) is deployed. Not yet tagged for release — build from source for now.
+> auth) is deployed. A `v0.1.0` tag exists but **no release was ever
+> published**, so the installer one-liners below don't work yet — use
+> `cargo install --git` or build from source. Re-tagging will produce one.
 > See **Roadmap** below for what's left.
 
 ## Install
 
-Once releases ship, these are the one-liners.
+⚠️ **No release has been published yet**, so these two one-liners currently
+404. They're what will work once a tag produces a release — until then, use
+the Cargo install below.
 
 **Linux / macOS:**
 
