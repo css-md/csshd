@@ -125,4 +125,59 @@ mod tests {
     fn garbage_url_is_rejected() {
         assert!(resolve_helpdesk(Some("not a url".into()), &cfg_with(None)).is_err());
     }
+
+    /// TOML has no null, so a `None` field has to be omitted rather than
+    /// written. Serializers differ on whether that is an error, and this
+    /// crate took a major version bump (toml 0.8 → 1.1) — so pin the shape
+    /// the config file actually needs to round-trip through.
+    #[test]
+    fn config_round_trips_through_toml() {
+        let cfg = Config {
+            helpdesk: Some("https://helpdesk.example.com".into()),
+            last_user: Some("someone@example.com".into()),
+        };
+        let text = toml::to_string_pretty(&cfg).expect("serialize");
+        let back: Config = toml::from_str(&text).expect("deserialize");
+        assert_eq!(
+            back.helpdesk.as_deref(),
+            Some("https://helpdesk.example.com")
+        );
+        assert_eq!(back.last_user.as_deref(), Some("someone@example.com"));
+    }
+
+    /// The state `csshd login` writes on a first run: a helpdesk URL but no
+    /// user yet, because `whoami` has not been called. If serializing a
+    /// `None` field errors, first login fails at the point it saves.
+    #[test]
+    fn config_with_unset_fields_serializes() {
+        let cfg = Config {
+            helpdesk: Some("https://helpdesk.example.com".into()),
+            last_user: None,
+        };
+        let text = toml::to_string_pretty(&cfg).expect("serialize with a None field");
+        let back: Config = toml::from_str(&text).expect("deserialize");
+        assert_eq!(
+            back.helpdesk.as_deref(),
+            Some("https://helpdesk.example.com")
+        );
+        assert_eq!(back.last_user, None);
+    }
+
+    #[test]
+    fn empty_config_round_trips() {
+        let text = toml::to_string_pretty(&Config::default()).expect("serialize default");
+        let back: Config = toml::from_str(&text).expect("deserialize");
+        assert_eq!(back.helpdesk, None);
+        assert_eq!(back.last_user, None);
+    }
+
+    /// A config file written by an older csshd, or hand-edited with extra
+    /// keys, must not break the client.
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let back: Config =
+            toml::from_str("helpdesk = \"https://x.example.com\"\nsomething_new = 42\n")
+                .expect("deserialize with an unknown key");
+        assert_eq!(back.helpdesk.as_deref(), Some("https://x.example.com"));
+    }
 }
