@@ -24,7 +24,7 @@ anyhow = "1"
 directories = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 url = "2"
-toml = "0.8"
+toml = "1.1"
 owo-colors = { version = "4", features = ["supports-colors"] }
 comfy-table = "7"
 webbrowser = "1"
